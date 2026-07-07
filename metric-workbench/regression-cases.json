@@ -1,0 +1,276 @@
+[
+  {
+    "id": "revenue_cost_core_metrics_2025",
+    "model_id": 40031,
+    "question": "2025年营业收入、销售成本、制造成本、净毛利率、单位主机成本分别是多少",
+    "tables": ["revenue_cost"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "收入成本表核心指标必须使用真实字段：营业收入=SUM(zxssr)，销售成本=SUM(zxsgscbhj)，制造成本=SUM(zzzcbhj)，净毛利率=SUM(zjml)/SUM(zxssr)，单位主机成本=SUM(zxsgscbhj)/SUM(zzjts)。",
+    "expect_any_column_groups": [
+      ["营业收入"],
+      ["销售成本"],
+      ["制造成本"],
+      ["净毛利率"],
+      ["单位主机成本", "单台主机成本"]
+    ],
+    "expect_sql_contains": ["zxssr", "zxsgscbhj", "zzzcbhj", "zjml", "zzjts"],
+    "reject_sql_contains": ["revenue_sales_company_cost - revenue_manufacturing_cost", "zxsgscbhj - zzzcbhj"]
+  },
+  {
+    "id": "bpc_cash_revenue_fixed_asset_2025",
+    "model_id": 40032,
+    "question": "2025年货币资金 / 营业收入 / 固定资产",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "2025年货币资金为 2,838,186,534.26，营业收入为 7,294,986,636.41，固定资产为 1,781,353,693.93。",
+    "expect_answer_contains": ["2838186534.26", "7294986636.41", "1781353693.93"],
+    "expect_columns": ["货币资金", "营业收入", "固定资产"],
+    "expect_approx": {
+      "货币资金": { "value": 2838186534.26, "tolerance": 0.1 },
+      "营业收入": { "value": 7294986636.41, "tolerance": 0.1 },
+      "固定资产": { "value": 1781353693.93, "tolerance": 0.1 }
+    },
+    "expect_sql_contains": ["ABS1000", "APL6000", "ABS1600"]
+  },
+  {
+    "id": "bpc_eps_roe_rd_ratio_2025",
+    "model_id": 40032,
+    "question": "集团2025年每股收益、加权平均净资产收益、研发投入占营业收入比例。",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "应返回集团2025年每股收益、加权平均净资产收益率、研发投入占营业收入比例，并按百分比展示比率类指标。",
+    "expect_answer_contains": ["每股", "净资产", "研发"],
+    "expect_any_column_groups": [
+      ["基本每股收益", "每股收益"],
+      ["加权平均净资产收益率", "加权平均净资产收益", "净资产收益率"],
+      ["研发投入比例", "研发投入占营业收入比例"]
+    ],
+    "expect_sql_contains": ["ET0649", "ET0652", "TFUA4000", "APL6000"]
+  },
+  {
+    "id": "bpc_financial_metrics_dec_2025",
+    "model_id": 40032,
+    "question": "2025年12月的资产负债率是多少？归母净利润是多少，销售毛利率是多少？基本每股收益是多少",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "2025年12月资产负债率约 57.86%，归母净利润为 659,538,772.40，销售毛利率约 25.85%，基本每股收益为 1.44。",
+    "expect_answer_contains": ["57.86%", "归母净利润", "25.85%", "1.44"],
+    "expect_any_column_groups": [
+      ["资产负债率"],
+      ["归母净利润"],
+      ["销售毛利率"],
+      ["基本每股收益", "每股收益"]
+    ],
+    "expect_sql_contains": ["APL6000", "APL6600", "ET0649"]
+  },
+  {
+    "id": "bpc_asset_liability_ratio_2025",
+    "model_id": 40032,
+    "question": "2025年资产负债率",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "2025年资产负债率约为 57.86%，并应返回负债总额和资产总额。",
+    "expect_answer_contains": ["57.86%", "负债总额", "资产总额"],
+    "expect_columns": ["资产负债率", "负债总额", "资产总额"],
+    "expect_approx": {
+      "资产负债率": { "value": 0.578641191283, "tolerance": 0.00001 },
+      "负债总额": { "value": 7169677446.73, "tolerance": 0.1 },
+      "资产总额": { "value": 12390541072.33, "tolerance": 0.1 }
+    },
+    "reject_answer_contains": ["不存在的业务规则", "new_result_presentation_301"]
+  },
+  {
+    "id": "bpc_debt_capacity_trend_2024_2025",
+    "model_id": 40032,
+    "question": "2024和2025年偿债能力指标，分别列出流动比率、速动比率、资产负债率是多少，并给出相应增长比例和趋势分析",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "应列出2024和2025年偿债能力指标：2024年流动比率约1.73、速动比率约1.21、资产负债率约53.76%；2025年流动比率约2.11、速动比率约1.53、资产负债率约57.86%，并给出增长比例和趋势分析。",
+    "expect_answer_contains": ["2024", "2025", "流动比率", "速动比率", "资产负债率", "整体"],
+    "expect_any_column_groups": [
+      ["时间", "期间", "年份"],
+      ["流动比率"],
+      ["速动比率"],
+      ["资产负债率"],
+      ["流动比率增长率", "流动比率增长比例"],
+      ["速动比率增长率", "速动比率增长比例"]
+    ],
+    "expect_min_rows": 2
+  },
+  {
+    "id": "bpc_net_profit_margin_2025",
+    "model_id": 40032,
+    "question": "2025年净利润率",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "2025年净利润率应按百分比展示，约为 8.97%。",
+    "expect_answer_contains": ["8.97%"],
+    "expect_any_column_groups": [["净利润率"]],
+    "reject_answer_contains": ["0.09%"]
+  },
+  {
+    "id": "bpc_multi_profit_ratios_2025",
+    "model_id": 40032,
+    "question": "2025年销售毛利率、成本利润率、营业利润率、净利润率、现金比例是多少？营业收入和营业成本分别是多少？",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "2025年销售毛利率约25.85%，成本利润率约11%，营业利润率约9.85%，净利润率约8.97%，现金比例约62.83%；营业收入为7,294,986,636.41，营业成本为5,409,013,938.21，并应补充一条整体经营状况判断。",
+    "expect_answer_contains": ["25.85%", "11%", "9.85%", "8.97%", "62.83%", "7294986636.41", "5409013938.21", "整体"],
+    "expect_any_column_groups": [
+      ["销售毛利率"],
+      ["成本利润率"],
+      ["营业利润率"],
+      ["净利润率"],
+      ["现金比例"],
+      ["营业收入"],
+      ["营业成本"]
+    ]
+  },
+  {
+    "id": "bpc_profit_margin_cash_ratio_roa_2025",
+    "model_id": 40032,
+    "question": "集团2025年净利润率、现金比率、总资产报酬率",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "集团2025年净利润率约 8.97%，现金比率约 62.83%，总资产报酬率约 6.97%；回答需要补充这些指标对盈利能力、现金保障或资产收益水平的简要判断。",
+    "expect_answer_contains": ["8.97%", "62.83%", "6.97%", "盈利"],
+    "expect_any_column_groups": [
+      ["净利润率"],
+      ["现金比率", "现金比例"],
+      ["总资产报酬率"]
+    ],
+    "reject_answer_contains": ["0.09%", "0.63%", "0.07%"]
+  },
+  {
+    "id": "bpc_undistributed_operating_profit_rd_expense_2025",
+    "model_id": 40032,
+    "question": "请告诉我集团2025年未分配利润、营业利润、研发费用金额",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "2025年未分配利润为 2,152,348,553.41，营业利润为 718,460,308.87，研发费用为 355,715,161.87。",
+    "expect_answer_contains": ["2152348553.41", "718460308.87", "355715161.87"],
+    "expect_columns": ["未分配利润", "营业利润", "研发费用"],
+    "expect_approx": {
+      "未分配利润": { "value": 2152348553.4099897, "tolerance": 0.1 },
+      "营业利润": { "value": 718460308.869955, "tolerance": 0.1 },
+      "研发费用": { "value": 355715161.87, "tolerance": 0.1 }
+    },
+    "expect_sql_contains": ["ABS4103", "ABS4104", "APL4000", "TFUA4000"]
+  },
+  {
+    "id": "bpc_sales_gross_margin_2025",
+    "model_id": 40032,
+    "question": "2025年销售毛利率是多少？",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "2025年销售毛利率约为 25.85%，不能把原始小数 0.2585 误展示成 0.26%。",
+    "expect_answer_contains": ["25.85%"],
+    "expect_any_column_groups": [["销售毛利率"]],
+    "expect_sql_contains": ["APL6000", "APL6600"],
+    "reject_answer_contains": ["0.26%", "0.2585%"]
+  },
+  {
+    "id": "bpc_yearly_revenue_yoy_2021_2025",
+    "model_id": 40032,
+    "question": "集团2021年至2025年期间，每年营业总收入总额是多少？同比增长多少？",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "2021年至2025年每年营业总收入应按年列出，并给出同比增长；大致为2021年33.03亿、2022年47.46亿、2023年66.68亿、2024年69.01亿、2025年72.95亿。",
+    "expect_answer_contains": ["2021", "2022", "2023", "2024", "2025", "同比"],
+    "expect_any_column_groups": [
+      ["年份", "时间", "期间"],
+      ["营业收入", "营业总收入"],
+      ["同比增长", "同比增长率"]
+    ],
+    "expect_min_rows": 4
+  },
+  {
+    "id": "bpc_row_count",
+    "model_id": 40032,
+    "question": "有多少数据一共",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "BPC合并报表在当前默认过滤口径下共有 5,978,710 条数据。",
+    "expect_answer_contains": ["5,978,710"],
+    "expect_any_column_groups": [["total_records", "total_rows", "数据量", "记录数", "总行数"]],
+    "expect_approx": {
+      "total_rows": { "value": 5978710, "tolerance": 0 }
+    }
+  },
+  {
+    "id": "expense_product_test_fee_202512",
+    "model_id": 40054,
+    "question": "请调取产品试验检验费科目2025.12月发生的费用清单",
+    "tables": ["expense_detail_voucher"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "应返回产品试验检验费科目 2025.12 月发生的费用明细清单，科目编码应解析为 6618000000，且结果至少有明细行。",
+    "expect_sql_contains": ["6618000000"],
+    "expect_min_rows": 1,
+    "reject_answer_contains": ["未找到"]
+  },
+  {
+    "id": "bpc_sales_admin_rd_expense_cumulative_may_2026_yoy",
+    "model_id": 40032,
+    "question": "2026年累计5月管销研费用是多少，同比增长多少，哪一项费用增长较多",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "应按累计口径直接取2026.05并对比2025.05，输出管销研费用合计、管理费用、销售费用、研发费用及同比增长率；其中管理费用增长较多。",
+    "expect_answer_contains": ["2026.05", "2025.05", "管销研", "管理费用", "销售费用", "研发费用", "同比"],
+    "expect_any_column_groups": [
+      ["期间", "时间"],
+      ["管销研费用合计", "管销研费用"],
+      ["管理费用"],
+      ["销售费用"],
+      ["研发费用"],
+      ["同比增长率", "同比增长", "增长率"]
+    ],
+    "expect_min_rows": 2,
+    "expect_sql_contains": ["2026.05", "2025.05", "APL6600", "TFUA3000", "TFUA2000", "TFUA4000"],
+    "reject_sql_contains": ["2026.04"]
+  }
+]

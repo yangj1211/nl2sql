@@ -1,0 +1,33 @@
+-- 回款表建表语句
+-- 基于 dwd_dcp.DWD_S4_ACDOCA 和 dwd_dcp.DWD_BM_ACDOCA 加工
+CREATE TABLE IF NOT EXISTS jst_flat.payment_collection (
+    rbukrs      VARCHAR(255) COMMENT '公司代码',
+    cbukrs      VARCHAR(255) COMMENT '公司代码（清洗后）',
+    cbuktx      VARCHAR(255) COMMENT '公司描述（清洗后）',
+    belnr       VARCHAR(255) COMMENT '会计凭证编号',
+    xtruerev    VARCHAR(255) COMMENT '标识：实际冲销',
+    rwcur       VARCHAR(255) COMMENT '交易货币',
+    rocur       VARCHAR(255) COMMENT '自由定义的货币1',
+    racct       VARCHAR(255) COMMENT '科目号',
+    prctr       VARCHAR(255) COMMENT '利润中心',
+    cprctr      VARCHAR(255) COMMENT '利润中心（清洗后）',
+    cprctx      VARCHAR(255) COMMENT '利润中心描述（清洗后）',
+    wsl         DECIMAL(23,2) COMMENT '以交易货币计的金额',
+    osl         DECIMAL(23,2) COMMENT '以自由定义的货币1计的金额',
+    bldat       VARCHAR(255) COMMENT '凭证日期',
+    blart       VARCHAR(255) COMMENT '凭证类型',
+    zuonr       VARCHAR(255) COMMENT '分配编号',
+    sgtxt       VARCHAR(255) COMMENT '项目文本',
+    kunnr       VARCHAR(255) COMMENT '客户编号',
+    kunnr_txt   VARCHAR(255) COMMENT '客户描述',
+    comp_head   VARCHAR(255) COMMENT '控股公司',
+    drcrk       VARCHAR(255) COMMENT '借/贷标识',
+    zsal_rep    VARCHAR(255) COMMENT '销售代表描述',
+    vkgrp       VARCHAR(255) COMMENT '销售代表',
+    vkbur       VARCHAR(255) COMMENT '销售代表处',
+    zsal_det    VARCHAR(255) COMMENT '销售代表处描述',
+    dept_id     VARCHAR(255) COMMENT '部门编码',
+    dept_name   VARCHAR(255) COMMENT '部门名称',
+    cbugrp      VARCHAR(255) COMMENT '合并账户组',
+    data_source VARCHAR(255)  COMMENT '数据来源'
+) COMMENT '回款表';

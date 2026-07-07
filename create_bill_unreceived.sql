@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS jst_flat.bill_unreceived (
+    msgtype               VARCHAR(255)   COMMENT '报文类型',
+    orig_no               VARCHAR(255)   COMMENT '票据号码',
+    bill_type             VARCHAR(255)   COMMENT '票据类型',
+    start_date            DATETIME       COMMENT '出票日期',
+    end_date              DATETIME       COMMENT '到期日期',
+    bill_money            DECIMAL(15,2)  COMMENT '票据金额',
+    payee                 VARCHAR(255)   COMMENT '收款人',
+    payer                 VARCHAR(255)   COMMENT '付款人',
+    acceptor              VARCHAR(255)   COMMENT '承兑人',
+    cdtratgs              VARCHAR(255)   COMMENT '信用等级',
+    bussdt                DATETIME       COMMENT '业务日期',
+    req_nm                VARCHAR(255)   COMMENT '申请人',
+    status                VARCHAR(255)   COMMENT '状态',
+    payer_bank_name       VARCHAR(255)   COMMENT '付款人开户行',
+    acceptor_bank_name    VARCHAR(255)   COMMENT '承兑人开户行',
+    sbbll_rng_strt_sn     VARCHAR(255)   COMMENT '子票区间开始序号',
+    sbbll_rng_end_sn      VARCHAR(255)   COMMENT '子票区间结束序号',
+    rec_acct_type_name    VARCHAR(255)   COMMENT '收票账户类型名称',
+    rec_nm                VARCHAR(255)   COMMENT '签收人',
+    corp_name             VARCHAR(255)   COMMENT '单位名称'
+) COMMENT='资金流水-汇票（未签收）';

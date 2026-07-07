@@ -1,0 +1,11 @@
+metric-workbench/.env.local
+.DS_Store
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+*.log
+.codex_tmp_*/
+.cursor/
+outputs/*.zip
+scripts/
