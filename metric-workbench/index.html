@@ -2711,6 +2711,82 @@
       white-space: nowrap;
     }
 
+    .timing-summary {
+      display: grid;
+      gap: 8px;
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      border: 1px solid #e4eaf2;
+      border-radius: 8px;
+      background: #f8fafc;
+    }
+
+    .timing-summary-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: #172033;
+      font-size: 12px;
+      font-weight: 850;
+      line-height: 1.4;
+    }
+
+    .timing-summary-slowest {
+      color: #64748b;
+      font-weight: 760;
+      white-space: nowrap;
+    }
+
+    .timing-step-list {
+      display: grid;
+      gap: 5px;
+    }
+
+    .timing-step {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: start;
+      padding: 7px 8px;
+      border: 1px solid #edf2f7;
+      border-radius: 7px;
+      background: #fff;
+    }
+
+    .timing-step-title {
+      color: #24324a;
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .timing-step-detail {
+      margin-top: 2px;
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 620;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .timing-step-duration {
+      color: #334155;
+      background: #eef4fb;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 850;
+      line-height: 1.35;
+      white-space: nowrap;
+    }
+
+    .timing-step.slow .timing-step-duration {
+      color: #9a3412;
+      background: #ffedd5;
+    }
+
     .qa-trace-list {
       position: relative;
       display: grid;
@@ -7512,6 +7588,79 @@
       return map[stage] || label;
     }
 
+    function timingStepTitle(step) {
+      const label = normalizeEvidenceText(step?.label || "");
+      if (label) return label;
+      return traceStreamTitle(step);
+    }
+
+    function timingStepDetail(step) {
+      return normalizeEvidenceText(
+        step?.summary ||
+          step?.finding ||
+          step?.decision ||
+          step?.detail ||
+          step?.conclusion ||
+          traceSummaryText(step)
+      );
+    }
+
+    function normalizeTimingSteps(result) {
+      const explicitSteps = Array.isArray(result?.timings?.steps) ? result.timings.steps : [];
+      const source = explicitSteps.length ? explicitSteps : (Array.isArray(result?.trace) ? result.trace : []);
+      return source
+        .filter(item => item && item.status !== "running")
+        .map((item, index) => {
+          const duration = Number(item.duration_ms || 0);
+          return {
+            ...item,
+            order: item.order || index + 1,
+            label: timingStepTitle(item),
+            duration_ms: Number.isFinite(duration) ? duration : 0,
+            summary: timingStepDetail(item),
+            status: item.status || ""
+          };
+        })
+        .filter(item => item.duration_ms > 0 || item.status);
+    }
+
+    function slowestTimingStep(steps) {
+      return steps.reduce((slowest, item) => {
+        if (!slowest) return item;
+        return Number(item.duration_ms || 0) > Number(slowest.duration_ms || 0) ? item : slowest;
+      }, null);
+    }
+
+    function renderTimingSummary(result) {
+      const steps = normalizeTimingSteps(result);
+      if (!steps.length) return "";
+      const slowest = slowestTimingStep(steps);
+      return `
+        <div class="timing-summary">
+          <div class="timing-summary-head">
+            <span>耗时明细</span>
+            ${slowest ? `<span class="timing-summary-slowest">最慢：${escapeHtml(timingStepTitle(slowest))} · ${formatDuration(slowest.duration_ms)}</span>` : ""}
+          </div>
+          <div class="timing-step-list">
+            ${steps.map(step => {
+              const duration = Number(step.duration_ms || 0);
+              const detail = timingStepDetail(step);
+              const slowClass = duration >= 5000 ? " slow" : "";
+              return `
+                <div class="timing-step${slowClass}">
+                  <div>
+                    <div class="timing-step-title">${escapeHtml(timingStepTitle(step))}</div>
+                    ${detail ? `<div class="timing-step-detail">${escapeHtml(detail)}</div>` : ""}
+                  </div>
+                  <span class="timing-step-duration">${escapeHtml(traceStatusText(step.status))} · ${formatDuration(duration)}</span>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        </div>
+      `;
+    }
+
     function traceStreamNote(item) {
       const values = [item?.finding, item?.decision]
         .map(value => normalizeEvidenceText(value))
@@ -7598,14 +7747,18 @@
     function renderExecutionTrace(result) {
       const trace = Array.isArray(result.trace) ? result.trace : [];
       const total = result.timings?.total_ms;
-      if (!trace.length && !total) return "";
+      const timingSummary = renderTimingSummary(result);
+      if (!trace.length && !total && !timingSummary) return "";
       return `
-        <details class="qa-details thought-stream">
+        <details class="qa-details thought-stream" open>
           <summary>思考完成${total ? ` · 总耗时 ${formatDuration(total)}` : ""}</summary>
           <div class="qa-details-body">
-            <ul class="qa-trace-list">
-              ${trace.map(renderTraceItem).join("")}
-            </ul>
+            ${timingSummary}
+            ${trace.length ? `
+              <ul class="qa-trace-list">
+                ${trace.map(renderTraceItem).join("")}
+              </ul>
+            ` : ""}
           </div>
         </details>
       `;

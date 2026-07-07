@@ -3205,6 +3205,54 @@ function traceItem(stage, label, status, startedAt, detail = "", artifact = null
   };
 }
 
+function timingStepLabel(stage, label = "") {
+  const map = {
+    question_config: "应用问数配置",
+    table_exploration: "查看数据源",
+    agent_loop: "思考规划",
+    sql_resultset_lookup: "补查目录",
+    retrieval_planning: "规划检索",
+    semantic_plan: "校验语义计划",
+    metric_expansion: "展开指标口径",
+    sql_generation: "生成 SQL",
+    mandatory_sql_enforcement: "落实固定口径",
+    sql_validation: "校验 SQL",
+    sql_execution: "执行查询",
+    sql_repair: "自动修复 SQL",
+    answer_generation: "整理回答"
+  };
+  return String(label || "").trim() || map[stage] || stage || "执行步骤";
+}
+
+function timingStepSummary(item) {
+  return String(
+    item?.finding ||
+      item?.decision ||
+      item?.detail ||
+      item?.summary ||
+      item?.conclusion ||
+      ""
+  ).trim();
+}
+
+function buildTimingSteps(trace = []) {
+  return (Array.isArray(trace) ? trace : [])
+    .filter(item => item && item.status !== "running")
+    .map((item, index) => {
+      const duration = Number(item.duration_ms || 0);
+      return {
+        id: item.id || `${item.stage || "step"}_${index + 1}`,
+        order: index + 1,
+        stage: item.stage || "",
+        label: timingStepLabel(item.stage, item.label),
+        raw_label: item.label || "",
+        status: item.status || "",
+        duration_ms: Number.isFinite(duration) ? duration : 0,
+        summary: timingStepSummary(item)
+      };
+    });
+}
+
 function compactList(values, max = 4) {
   const list = [...new Set((values || []).filter(Boolean).map(String))];
   if (list.length <= max) return list.join("、");
@@ -5052,6 +5100,7 @@ async function callNl2Sql(payload, options = {}) {
     trace,
     timings: {
       total_ms: elapsedMs(totalStartedAt),
+      steps: buildTimingSteps(trace),
       trace
     }
   });
@@ -5119,7 +5168,14 @@ async function callNl2Sql(payload, options = {}) {
   let loopResult;
   stageStartedAt = Date.now();
   try {
-    loopResult = await runSemanticAgentLoop(payload, pushTrace, emitProgress);
+    try {
+      loopResult = await tryEvidenceFirstPlan(payload, pushTrace);
+    } catch {
+      loopResult = null;
+    }
+    if (!loopResult) {
+      loopResult = await runSemanticAgentLoop(payload, pushTrace, emitProgress);
+    }
   } catch (error) {
     pushTrace(traceItem(
       "agent_loop",
