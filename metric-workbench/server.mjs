@@ -1483,57 +1483,36 @@ function agentSemanticCatalogContext(payload) {
   };
 }
 
-function stripQuestionTermNoise(value) {
-  return String(value || "")
-    .replace(/20\d{2}\s*年\s*(?:0?[1-9]|1[0-2])?\s*月?/g, " ")
-    .replace(/20\d{2}\.(?:0?[1-9]|1[0-2])/g, " ")
-    .replace(/\b20\d{2}\b/g, " ")
-    .replace(/(请|帮我|查询|提供|看看|一下|多少|是多少|数据|集团口径|集团|口径|法口|管口|分别|以及|还有|相关|情况|统计|汇总|的)/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function questionSemanticTerms(question) {
-  const text = stripQuestionTermNoise(question);
-  return [...new Set(text
-    .split(/[\/、,，;；\n]+/)
-    .map(item => stripQuestionTermNoise(item))
-    .map(item => item.replace(/^[和与及]+|[和与及]+$/g, "").trim())
-    .filter(item => normalizeCandidateText(item).length >= 2)
-  )];
-}
-
-function metricMentionNames(metric) {
-  return [metric?.name, metric?.key, ...(Array.isArray(metric?.aliases) ? metric.aliases : [])]
-    .map(item => String(item || "").trim())
-    .filter(item => normalizeCandidateText(item).length >= 2);
-}
-
-function metricExplicitlyMentioned(metric, question) {
-  return metricMatchesCoverageItem(metric, question);
-}
-
-function pruneContainedMetricMentions(metrics) {
-  return metrics.filter(metric => {
-    const names = metricMentionNames(metric).map(normalizeCandidateText);
-    return !metrics.some(other => {
-      if (other === metric) return false;
-      const otherNames = metricMentionNames(other).map(normalizeCandidateText);
-      return names.some(name => (
-        name.length >= 2
-        && otherNames.some(otherName => otherName.length > name.length && otherName.includes(name))
-      ));
-    });
-  });
-}
-
-function selectedMetricsFromQuestion(payload) {
-  const metrics = semanticEntries(payload, "business_metric");
-  return pruneContainedMetricMentions(metrics.filter(metric => metricExplicitlyMentioned(metric, payload.question || "")));
-}
-
 function questionRequestsMetricBreakdown(payload) {
   return /哪一项|哪项|哪个|增长较多|增长最多|增长最大|分项|拆分|构成|分别|各项|明细|分类|同比变化|变动/.test(String(payload?.question || ""));
+}
+
+function queryRequestsAnalyticalSql(payload, plan = payload?.retrieval_plan) {
+  const semanticPlan = plan?.semantic_plan || {};
+  const text = [
+    payload?.question,
+    plan?.intent,
+    plan?.summary,
+    semanticPlan.time,
+    ...(Array.isArray(semanticPlan.dimensions) ? semanticPlan.dimensions : []),
+    ...(Array.isArray(semanticPlan.calculations) ? semanticPlan.calculations : []),
+    ...(Array.isArray(semanticPlan.output) ? semanticPlan.output : [])
+  ]
+    .flatMap(item => {
+      if (item == null) return [];
+      if (typeof item === "object") return [JSON.stringify(item)];
+      return [String(item)];
+    })
+    .join("\n");
+  const compact = text.replace(/\s+/g, "");
+  return [
+    /trend_analysis|dimension_summary|detail_query|period_overview|table_analysis/i,
+    /(20\d{2})年?(?:至|到|~|～|-|—)(20\d{2})年?/,
+    /(?:各|每|逐|按|分).{0,8}(?:年|年度|月|月份|月度|季度|期间|日期)/,
+    /(?:一|二|三|四|1|2|3|4|Q[1-4])季度/i,
+    /季度|同比|环比|增长|趋势|变化|对比|排名|排行|top|占比|构成|分布|分项|拆分|分类|分组|明细|清单/i,
+    /按.{1,16}(?:公司|客户|产品|科目|部门|组织|地区|区域|类型|类别|维度|字段|期间|日期|表).{0,8}(?:汇总|统计|分组|展示|列出|对比)?/
+  ].some(pattern => pattern.test(compact));
 }
 
 function metricBreakdownKeys(metric) {
@@ -1561,45 +1540,6 @@ function expandSelectedMetricKeysByBreakdown(payload, metrics, selectedKeys) {
     metricBreakdownKeys(metric).forEach(add);
   });
   return result;
-}
-
-function removeMetricMentionsFromTerm(term, selectedMetrics) {
-  let text = String(term || "");
-  selectedMetrics.forEach(metric => {
-    metricMentionNames(metric)
-      .sort((a, b) => b.length - a.length)
-      .forEach(name => {
-        if (!name) return;
-        text = text.split(name).join(" ");
-      });
-  });
-  return stripQuestionTermNoise(text)
-    .replace(/^[和与及]+|[和与及]+$/g, "")
-    .trim();
-}
-
-function unresolvedQuestionTerms(payload, selectedMetrics) {
-  return questionSemanticTerms(payload.question || "")
-    .map(term => removeMetricMentionsFromTerm(term, selectedMetrics))
-    .map(term => stripQuestionTermNoise(term))
-    .filter(term => normalizeCandidateText(term).length >= 2)
-    .filter(term => !selectedMetrics.some(metric => metricMatchesCoverageItem(metric, term)));
-}
-
-function preferredSqlResultsetForLookup(payload, terms) {
-  const resultsets = semanticEntries(payload, "sql_resultset");
-  if (!resultsets.length) return null;
-  const termText = (terms || []).join(" ");
-  const ranked = resultsets.map((entry, index) => {
-    const text = semanticEntryContextText(entry);
-    const accountBias = /(科目|account|racct|saknr|合并科目|编码|映射)/i.test(text) ? 0.2 : 0;
-    return {
-      entry,
-      index,
-      score: scoreSemanticEntryForQuestion(entry, termText) + accountBias
-    };
-  }).sort((a, b) => b.score - a.score || a.index - b.index);
-  return ranked[0]?.entry || null;
 }
 
 function payloadFilterSignals(payload) {
@@ -1867,124 +1807,6 @@ function genericTimeSqlFilters(payload, sourceTable) {
     source: "question_time",
     reason: "问题文本命中年份。"
   }];
-}
-
-async function tryEvidenceFirstPlan(payload, pushTrace) {
-  const startedAt = Date.now();
-  const metricEntries = semanticEntries(payload, "business_metric");
-  const metricMap = new Map(metricEntries.map(metric => [metric.key, metric]));
-  const initiallySelectedMetrics = selectedMetricsFromQuestion(payload);
-  const initiallySelectedMetricKeys = initiallySelectedMetrics.map(metric => metric.key).filter(Boolean);
-  const selectedMetricKeys = computableMetricKeys(
-    payload,
-    expandSelectedMetricKeysByBreakdown(payload, metricMap, initiallySelectedMetricKeys)
-  );
-  const selectedMetrics = selectedMetricKeys.map(key => metricMap.get(key)).filter(Boolean);
-  const unresolvedTerms = unresolvedQuestionTerms(payload, selectedMetrics);
-  if (!selectedMetricKeys.length && !unresolvedTerms.length) return null;
-  const resultsetEntry = unresolvedTerms.length ? preferredSqlResultsetForLookup(payload, unresolvedTerms) : null;
-  if (unresolvedTerms.length && !resultsetEntry) return null;
-  const ruleKeys = semanticMandatoryRuleKeys(payload);
-
-  const plan = normalizeRetrievalPlanData({
-    intent: "metric_query",
-    selected_metric_keys: selectedMetricKeys,
-    selected_rule_keys: ruleKeys,
-    disabled_mandatory_filter_ids: [],
-    needs_sql_resultset: Boolean(unresolvedTerms.length),
-    sql_resultset_lookups: unresolvedTerms.length
-      ? [{
-          key: resultsetEntry.key || resultsetEntry.name,
-          terms: unresolvedTerms,
-          reason: "用户问题中包含未配置为业务指标的对象，先用 SQL结果集解析编码。"
-        }]
-      : [],
-    coverage_checklist: [
-      ...selectedMetrics.map(metric => ({
-        item: metric.name || metric.key,
-        item_type: "metric",
-        status: "covered",
-        evidence_type: "business_metric",
-        evidence_key: metric.key,
-        needs_lookup: false,
-        note: "问题文本命中业务指标名称或别名。"
-      })),
-      ...unresolvedTerms.map(term => ({
-        item: term,
-        item_type: "object",
-        status: "needs_lookup",
-        evidence_type: "none",
-        evidence_key: resultsetEntry?.key || resultsetEntry?.name || "",
-        needs_lookup: true,
-        note: "未命中业务指标，先通过 SQL结果集解析编码。"
-      }))
-    ],
-    semantic_plan: {
-      mode: unresolvedTerms.length ? "needs_lookup" : "verified_metric_query",
-      metrics: selectedMetricKeys,
-      tables: selectedPayloadTables(payload),
-      time: genericQuestionYear(payload),
-      dimensions: [],
-      calculations: ["aggregation"],
-      filters: ruleKeys,
-      needs_lookup: unresolvedTerms,
-      output: [...selectedMetrics.map(metric => metric.name || metric.key), ...unresolvedTerms]
-    },
-    summary: "语义目录和目录结果集已能覆盖本轮问题。",
-    warnings: []
-  });
-
-  let resolvedSqlResultsets = [];
-  if (unresolvedTerms.length) {
-    resolvedSqlResultsets = await resolveSqlResultsets(payload, plan);
-    const resolution = lookupResolutionFromResultsets(payload, plan, resolvedSqlResultsets);
-    if (!resolution.ok) return null;
-    plan.needs_sql_resultset = false;
-    plan.coverage_checklist = plan.coverage_checklist.map(item => {
-      if (!unresolvedTerms.includes(item.item)) return item;
-      return {
-        ...item,
-        status: "covered",
-        evidence_type: "sql_resultset",
-        needs_lookup: false,
-        note: "已通过 SQL结果集解析到可用编码。"
-      };
-    });
-  }
-
-  pushTrace(traceItem(
-    "semantic_plan",
-    "证据覆盖检查",
-    "success",
-    startedAt,
-    `指标：${semanticEntryLabels(payload, "business_metric", selectedMetricKeys, 8) || "无"}；目录对象：${compactList(unresolvedTerms, 6) || "无"}`,
-    {
-      selected_metric_keys: selectedMetricKeys,
-      unresolved_terms: unresolvedTerms,
-      resolved_sql_resultsets: resolvedSqlResultsets.map(item => ({
-        key: item.key,
-        row_count: item.row_count,
-        rows: (item.rows || []).slice(0, 5)
-      })),
-      retrieval_plan: plan
-    },
-    "当前问题已经被业务指标和目录结果集覆盖，可以直接进入 SQL 编译，不再让模型重复判断。",
-    {
-      id: "evidence_first_plan",
-      purpose: "在证据已经完整时提前收束，减少模型循环耗时。",
-      finding: unresolvedTerms.length
-        ? `已补齐目录对象：${compactList(unresolvedTerms, 6)}`
-        : `已命中指标：${semanticEntryLabels(payload, "business_metric", selectedMetricKeys, 8)}`,
-      decision: "跳过第一轮模型判断，交给确定性 SQL 编译器。"
-    }
-  ));
-
-  return {
-    mode: "sql",
-    retrievalPlan: plan,
-    resolvedSqlResultsets,
-    generated: null
-  };
 }
 
 function buildAgentLoopMessages(payload, state) {
@@ -4644,14 +4466,8 @@ async function callNl2Sql(payload, options = {}) {
   let loopResult;
   stageStartedAt = Date.now();
   try {
-    try {
-      loopResult = await tryEvidenceFirstPlan(payload, pushTrace);
-    } catch {
-      loopResult = null;
-    }
-    if (!loopResult) {
-      loopResult = await runSemanticAgentLoop(payload, pushTrace, emitProgress);
-    }
+    // Always understand the full question before any deterministic SQL shortcut.
+    loopResult = await runSemanticAgentLoop(payload, pushTrace, emitProgress);
   } catch (error) {
     pushTrace(traceItem(
       "agent_loop",
@@ -4778,7 +4594,8 @@ async function callNl2Sql(payload, options = {}) {
     if (deterministicSeed) {
       const normalizedSeed = normalizeGeneratedSqlData(deterministicSeed, enrichedPayload);
       const deterministicPreview = buildDeterministicMetricSql(enrichedPayload, normalizedSeed, mandatoryContext);
-      if (deterministicPreview?.sql) {
+      const analyticalIntent = queryRequestsAnalyticalSql(enrichedPayload, retrievalPlan);
+      if (deterministicPreview?.sql && (!analyticalIntent || hasAnalyticalSqlShape(deterministicPreview.sql))) {
         generation = {
           model: "deterministic-compiler",
           data: deterministicSeed,
@@ -4870,10 +4687,15 @@ async function callNl2Sql(payload, options = {}) {
   ];
   const metricExpansionStartedAt = Date.now();
   const preserveAnalyticalSql = hasAnalyticalSqlShape(generated.sql);
+  const analyticalIntent = queryRequestsAnalyticalSql(enrichedPayload, retrievalPlan);
   const deterministicMetricSql = preserveAnalyticalSql
     ? null
     : buildDeterministicMetricSql(enrichedPayload, generated, mandatoryContext);
-  if (deterministicMetricSql?.sql) {
+  const canUseDeterministicMetricSql = Boolean(
+    deterministicMetricSql?.sql
+    && (!analyticalIntent || hasAnalyticalSqlShape(deterministicMetricSql.sql))
+  );
+  if (canUseDeterministicMetricSql) {
     generated.sql = deterministicMetricSql.sql;
     generated.display_formats = deterministicMetricSql.displayFormats || [];
     generated.sql_plan = [
@@ -4911,6 +4733,22 @@ async function callNl2Sql(payload, options = {}) {
         purpose: "把业务指标配置转换成稳定 SQL，减少模型自由书写导致的符号错误。",
         finding: `本次展开 ${deterministicMetricSql.selectedKeys.length} 个输出指标、${deterministicMetricSql.baseKeys.length} 个基础项。`,
         decision: "采用后端展开 SQL 替代模型手写 SQL，继续进入只读校验和数据库查询。"
+      }
+    ));
+  } else if (analyticalIntent && deterministicMetricSql?.sql && looksLikeExecutableSelectSql(generated.sql)) {
+    pushTrace(traceItem(
+      "metric_expansion",
+      "保留模型分析意图",
+      "skipped",
+      metricExpansionStartedAt,
+      `已命中指标：${semanticEntryLabels(enrichedPayload, "business_metric", generated.decision?.selected_metric_keys || [], 8) || "无"}`,
+      sqlGenerationArtifact(generated),
+      "问题包含按期间、分组、趋势、明细或对比等分析要求；后端单值指标编译结果不会覆盖模型 SQL。",
+      {
+        id: "metric_expansion_preserve_analysis",
+        purpose: "避免通用指标编译器把分析型问题压缩成单一汇总值。",
+        finding: "检测到分析型问题，但确定性编译结果没有保留 GROUP BY、WITH、窗口函数或多期间结构。",
+        decision: "保留模型生成的 SQL，继续做公共过滤注入和安全校验。"
       }
     ));
   } else if (preserveAnalyticalSql && looksLikeExecutableSelectSql(generated.sql) && (generated.decision?.selected_metric_keys || []).length) {
