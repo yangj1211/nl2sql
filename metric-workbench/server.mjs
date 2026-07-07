@@ -129,7 +129,10 @@ function selectedPayloadTables(payload) {
   const selected = Array.isArray(payload?.qa_config?.selected_tables)
     ? payload.qa_config.selected_tables
     : [];
-  const tables = selected.length ? selected : parseDataSourceTables(payload?.data_source);
+  const scoped = Array.isArray(payload?.qa_config?.table_scope?.tables)
+    ? payload.qa_config.table_scope.tables
+    : [];
+  const tables = selected.length ? selected : scoped.length ? scoped : parseDataSourceTables(payload?.data_source);
   return [...new Set(tables.map(item => String(item || "").trim()).filter(Boolean))];
 }
 
@@ -958,7 +961,6 @@ function resultsetLookupColumns(columns) {
     /^racct$/i,
     /^saknr$/i,
     /^hkont$/i,
-    /^cpmb_kgd4b76$/i,
     /^account_code$/i,
     /^account_no$/i
   ];
@@ -1397,11 +1399,7 @@ function lookupResolutionFromResultsets(payload, plan, resolvedSqlResultsets = [
   if (!terms.length || !resolvedSqlResultsets.length) {
     return { ok: false, terms, unresolved_terms: terms, resolved_items: [] };
   }
-  const resolvedItems = resolvedAccountItemsFromPayload({
-    ...payload,
-    retrieval_plan: plan,
-    resolved_sql_resultsets: resolvedSqlResultsets
-  });
+  const resolvedItems = resolvedItemsFromResultsets(plan, resolvedSqlResultsets);
   const unresolvedTerms = terms.filter(term => !resolvedItems.some(item => {
     const normalizedTerm = normalizeCandidateText(term);
     const itemTexts = [item.item, item.name, item.code].map(normalizeCandidateText).filter(Boolean);
@@ -1474,7 +1472,7 @@ function selectRelevantSemanticEntries(payload, type, limit, pinnedKeys = []) {
 }
 
 function agentSemanticCatalogContext(payload) {
-  const mandatoryRuleKeys = bpcMandatoryRuleKeys(payload);
+  const mandatoryRuleKeys = semanticMandatoryRuleKeys(payload);
   return {
     business_metric: selectRelevantSemanticEntries(payload, "business_metric", 18),
     logic_text: selectRelevantSemanticEntries(payload, "logic_text", 8, mandatoryRuleKeys),
@@ -1561,9 +1559,6 @@ function expandSelectedMetricKeysByBreakdown(payload, metrics, selectedKeys) {
   keys.forEach(key => {
     const metric = metrics.get(key);
     metricBreakdownKeys(metric).forEach(add);
-    if (key === "bpc_sales_admin_rd_expense") {
-      ["bpc_management_expense", "bpc_sales_expense", "bpc_rd_expense"].forEach(add);
-    }
   });
   return result;
 }
@@ -1607,26 +1602,294 @@ function preferredSqlResultsetForLookup(payload, terms) {
   return ranked[0]?.entry || null;
 }
 
+function payloadFilterSignals(payload) {
+  const dataPath = payload?.qa_config?.data_path || {};
+  const transactionScope = payload?.qa_config?.transaction_scope || {};
+  const values = [
+    payload?.question,
+    dataPath.label,
+    dataPath.value,
+    transactionScope.label,
+    transactionScope.value
+  ].filter(Boolean).map(String);
+  if (dataPath.value === "legal") values.push("法口", "法口数据", "LG");
+  if (dataPath.value === "management") values.push("管口", "管口数据", "PC");
+  return values;
+}
+
+function parseNamedFilterAliases(content) {
+  const aliases = [];
+  const bracket = String(content || "").match(/使用该过滤口径[：:]\s*\[([^\]]+)\]/);
+  if (bracket) {
+    bracket[1]
+      .split(/[,\n，、]+/)
+      .map(item => item.replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, "").trim())
+      .filter(Boolean)
+      .forEach(item => aliases.push(item));
+  }
+  const title = String(content || "").match(/【命名过滤】([^\n]+)/);
+  if (title?.[1]) aliases.push(title[1].trim());
+  return [...new Set(aliases)];
+}
+
+function parseNamedFilterCondition(content) {
+  const match = String(content || "").match(/过滤条件[：:]\s*([^\n\r]+)/);
+  return match?.[1]?.trim().replace(/[。；;]\s*$/g, "") || "";
+}
+
+function sqlConditionField(condition) {
+  const match = String(condition || "").match(/`?([A-Za-z_][\w$]*)`?\s*(?:=|<>|!=|LIKE|NOT\s+LIKE|IN|NOT\s+IN)(?=\s|'|\()/i);
+  return match?.[1] || "";
+}
+
+function semanticNamedSqlFilters(payload) {
+  const signals = payloadFilterSignals(payload);
+  const signalText = signals.join("\n");
+  return semanticEntries(payload, "logic_text")
+    .map(entry => {
+      const content = semanticEntryContextText(entry);
+      const aliases = parseNamedFilterAliases(content);
+      const condition = parseNamedFilterCondition(content);
+      const field = sqlConditionField(condition);
+      const matched = aliases.some(alias => signalText.includes(alias))
+        || signals.some(signal => content.includes(signal) && /【命名过滤】|过滤条件/.test(content));
+      if (!condition || !matched) return null;
+      return {
+        id: `semantic_named_filter_${entry.key || entry.name || field}`,
+        rule_key: entry.key || entry.name || "",
+        field,
+        sql: condition,
+        source: entry.name || entry.key || "命名过滤",
+        reason: "问数配置或问题文本命中命名过滤。"
+      };
+    })
+    .filter(Boolean);
+}
+
+function parseInlineSqlConditions(content) {
+  const conditions = [];
+  const seen = new Set();
+  const text = String(content || "");
+  const addCondition = condition => {
+    const normalized = String(condition || "").trim();
+    const signature = sqlConditionSignature(normalized);
+    if (!normalized || seen.has(signature)) return;
+    seen.add(signature);
+    conditions.push(normalized);
+  };
+  let blockMatch;
+  const notBlockRe = /(?:^|\n)\s*AND\s+NOT\s*\(([\s\S]*?)\)/gi;
+  while ((blockMatch = notBlockRe.exec(text))) {
+    const inner = String(blockMatch[1] || "").trim();
+    if (inner) addCondition(`NOT (\n${inner}\n)`);
+  }
+  const inlineText = text.replace(notBlockRe, "\n");
+  inlineText
+    .split(/\r?\n/)
+    .map(line => line.trim().replace(/^[\d一二三四五六七八九十]+[.、]\s*/g, ""))
+    .forEach(line => {
+      const match = line.match(/^(?:AND\s+)?(`?[A-Za-z_][\w$]*`?\s*(?:=|<>|!=|LIKE|NOT\s+LIKE)\s*'[^']+')/i);
+      if (!match) return;
+      addCondition(match[1]);
+    });
+  return conditions;
+}
+
+function semanticDefaultSqlFilters(payload) {
+  return semanticEntries(payload, "logic_text")
+    .flatMap(entry => {
+      const content = semanticEntryContextText(entry);
+      if (!/(固定过滤|默认过滤|公共过滤|必须过滤|普通查询)/.test(content)) return [];
+      return parseInlineSqlConditions(content)
+        .map(sql => {
+          const field = sqlConditionField(sql);
+          return {
+            id: `semantic_default_filter_${entry.key || entry.name || field}_${field}`,
+            rule_key: entry.key || entry.name || "",
+            field,
+            value: (sql.match(/=\s*'([^']*)'/) || [])[1],
+            sql,
+            source: entry.name || entry.key || "默认过滤",
+            reason: "语义规则声明为固定/默认过滤。"
+          };
+        })
+        .filter(Boolean);
+    });
+}
+
+function semanticSqlFilters(payload) {
+  const filters = [];
+  const seen = new Set();
+  [...semanticNamedSqlFilters(payload), ...semanticDefaultSqlFilters(payload)].forEach(item => {
+    const signature = sqlConditionSignature(item?.sql || "");
+    if (!signature || seen.has(signature)) return;
+    seen.add(signature);
+    filters.push(item);
+  });
+  return filters;
+}
+
+function semanticMandatoryRuleKeys(payload) {
+  return semanticSqlFilters(payload).map(item => item.rule_key).filter(Boolean);
+}
+
+function genericQuestionYear(payload) {
+  const text = String(payload?.question || "");
+  const match = text.match(/(20\d{2})\s*年/) || text.match(/(^|[^\d])((?:20)\d{2})(?!\d)/);
+  return match ? (match[2] || match[1]) : "";
+}
+
+function collectTimeValues(value, out = []) {
+  if (value == null) return out;
+  if (typeof value === "string" || typeof value === "number") {
+    const text = String(value).trim();
+    if (text) out.push(text);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    value.forEach(item => collectTimeValues(item, out));
+    return out;
+  }
+  if (typeof value === "object") {
+    [
+      value.period,
+      value.periods,
+      value.current_period,
+      value.comparison_period,
+      value.previous_period,
+      value.current,
+      value.previous,
+      value.year,
+      value.years,
+      value.value,
+      value.values
+    ].forEach(item => collectTimeValues(item, out));
+    if (value.start_year && value.end_year) {
+      const start = Number(value.start_year);
+      const end = Number(value.end_year);
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        const step = start <= end ? 1 : -1;
+        for (let year = start; step > 0 ? year <= end : year >= end; year += step) {
+          out.push(String(year));
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function tableContextForSource(payload, sourceTable) {
+  const target = splitQualifiedTableName(sourceTable).table.toLowerCase();
+  return (payload?.table_context || []).find(table => {
+    const names = [table?.table, table?.qualified_table].filter(Boolean).map(item => splitQualifiedTableName(item).table.toLowerCase());
+    return names.includes(target);
+  }) || null;
+}
+
+function genericYearColumn(payload, sourceTable) {
+  const table = tableContextForSource(payload, sourceTable);
+  const columns = Array.isArray(table?.columns) ? table.columns : [];
+  const names = columns.map(column => String(column?.name || column || "")).filter(Boolean);
+  const lower = new Map(names.map(name => [name.toLowerCase(), name]));
+  for (const candidate of ["r_gjahr", "gjahr", "fiscal_year", "year", "年份", "年度"]) {
+    if (lower.has(candidate.toLowerCase())) return lower.get(candidate.toLowerCase());
+  }
+  const semanticColumn = columns.find(column => {
+    const text = `${column?.name || column || ""}\n${column?.comment || ""}\n${(column?.sample_values || []).join("\n")}`;
+    return /(年份|年度|年月|月份|期间|日期|period|year|month|date)/i.test(text);
+  });
+  if (semanticColumn) return String(semanticColumn.name || semanticColumn || "");
+  return "";
+}
+
+function genericYearColumnValue(payload, sourceTable, field, year) {
+  const table = tableContextForSource(payload, sourceTable);
+  const column = (table?.columns || []).find(item => String(item?.name || item || "") === field);
+  const samples = (column?.sample_values || []).map(String);
+  if (samples.some(value => /^20\d{2}\.(0[1-9]|1[0-2])$/.test(value))) return `${year}.12`;
+  return year;
+}
+
+function normalizeGenericTimeValue(payload, sourceTable, field, value) {
+  const text = String(value || "").trim();
+  const period = text.match(/^(20\d{2})[.-](0?[1-9]|1[0-2])$/);
+  if (period) return `${period[1]}.${String(period[2]).padStart(2, "0")}`;
+  const year = text.match(/^20\d{2}$/) ? text : "";
+  if (year) return genericYearColumnValue(payload, sourceTable, field, year);
+  return "";
+}
+
+function previousYearEndGenericTimeValue(value) {
+  const match = String(value || "").match(/^(20\d{2})(?:\.(0[1-9]|1[0-2]))?$/);
+  if (!match) return "";
+  return `${Number(match[1]) - 1}.12`;
+}
+
+function genericRequestedTimeValues(payload, sourceTable) {
+  const field = genericYearColumn(payload, sourceTable);
+  if (!field) return [];
+  const semanticPlan = payload?.retrieval_plan?.semantic_plan || {};
+  const rawValues = collectTimeValues(semanticPlan.time, []);
+  collectTimeValues(payload?.retrieval_plan?.time, rawValues);
+  if (!rawValues.length) {
+    const text = String(payload?.question || "");
+    let match;
+    const rangeRe = /(20\d{2})\s*年?\s*(?:至|到|~|～|-|—)\s*(20\d{2})\s*年?/g;
+    while ((match = rangeRe.exec(text))) {
+      const start = Number(match[1]);
+      const end = Number(match[2]);
+      const step = start <= end ? 1 : -1;
+      for (let year = start; step > 0 ? year <= end : year >= end; year += step) rawValues.push(String(year));
+    }
+    const yearMonthRe = /(20\d{2})\s*年\s*(?:累计(?:至|到)?|截至|截止|至|1\s*[-至到~～]\s*)?\s*(0?[1-9]|1[0-2])\s*月/g;
+    while ((match = yearMonthRe.exec(text))) rawValues.push(`${match[1]}.${String(match[2]).padStart(2, "0")}`);
+    if (!rawValues.length) {
+      const year = genericQuestionYear(payload);
+      if (year) rawValues.push(year);
+    }
+  }
+  return [...new Set(rawValues
+    .map(value => normalizeGenericTimeValue(payload, sourceTable, field, value))
+    .filter(Boolean))]
+    .sort();
+}
+
+function genericTimeSqlFilters(payload, sourceTable) {
+  const field = genericYearColumn(payload, sourceTable);
+  if (!field) return [];
+  const value = genericRequestedTimeValues(payload, sourceTable)[0];
+  if (!value) return [];
+  return [{
+    id: `generic_year_${field}`,
+    field,
+    value,
+    sql: `${sqlIdentifier(field)} = ${sqlLiteral(value)}`,
+    source: "question_time",
+    reason: "问题文本命中年份。"
+  }];
+}
+
 async function tryEvidenceFirstPlan(payload, pushTrace) {
-  if (!isBpcPayload(payload)) return null;
   const startedAt = Date.now();
   const metricEntries = semanticEntries(payload, "business_metric");
   const metricMap = new Map(metricEntries.map(metric => [metric.key, metric]));
   const initiallySelectedMetrics = selectedMetricsFromQuestion(payload);
   const initiallySelectedMetricKeys = initiallySelectedMetrics.map(metric => metric.key).filter(Boolean);
-  const selectedMetricKeys = expandSelectedMetricKeysByBreakdown(payload, metricMap, initiallySelectedMetricKeys);
+  const selectedMetricKeys = computableMetricKeys(
+    payload,
+    expandSelectedMetricKeysByBreakdown(payload, metricMap, initiallySelectedMetricKeys)
+  );
   const selectedMetrics = selectedMetricKeys.map(key => metricMap.get(key)).filter(Boolean);
   const unresolvedTerms = unresolvedQuestionTerms(payload, selectedMetrics);
   if (!selectedMetricKeys.length && !unresolvedTerms.length) return null;
-  if (!selectedMetricKeys.length && !unresolvedTerms.length) return null;
-
   const resultsetEntry = unresolvedTerms.length ? preferredSqlResultsetForLookup(payload, unresolvedTerms) : null;
   if (unresolvedTerms.length && !resultsetEntry) return null;
+  const ruleKeys = semanticMandatoryRuleKeys(payload);
 
   const plan = normalizeRetrievalPlanData({
     intent: "metric_query",
     selected_metric_keys: selectedMetricKeys,
-    selected_rule_keys: bpcMandatoryRuleKeys(payload),
+    selected_rule_keys: ruleKeys,
     disabled_mandatory_filter_ids: [],
     needs_sql_resultset: Boolean(unresolvedTerms.length),
     sql_resultset_lookups: unresolvedTerms.length
@@ -1660,10 +1923,10 @@ async function tryEvidenceFirstPlan(payload, pushTrace) {
       mode: unresolvedTerms.length ? "needs_lookup" : "verified_metric_query",
       metrics: selectedMetricKeys,
       tables: selectedPayloadTables(payload),
-      time: bpcPeriodInfo(payload).period || "",
+      time: genericQuestionYear(payload),
       dimensions: [],
       calculations: ["aggregation"],
-      filters: bpcMandatoryRuleKeys(payload),
+      filters: ruleKeys,
       needs_lookup: unresolvedTerms,
       output: [...selectedMetrics.map(metric => metric.name || metric.key), ...unresolvedTerms]
     },
@@ -2277,7 +2540,7 @@ function buildMessages(payload) {
         "如果用户问的是具体数值，answer 要说明需要执行生成的 SQL 才能得到最终数值，并简要解释口径。",
         "如果用户问的是规则、口径、字段含义，可以直接用证据回答，不需要假装查数。",
         "如果证据不足，不要硬写 SQL，要在 warnings 里说明缺什么。",
-        "必须使用 semantic_catalog、table_context 或 resolved_sql_resultsets 中出现的真实字段名，不要把 b28_s_kgd353d 改写成 period，不要把 b28_s_kgd4kbn 改写成 currency，不要把 b28_s_kgdp984 改写成 version。",
+        "必须使用 semantic_catalog、table_context 或 resolved_sql_resultsets 中出现的真实字段名，不要把业务含义改写成 period/currency/version/status 等不存在的通用字段名。",
         "如果 semantic_catalog.business_metric 中已有指标定义，返回 SQL 必须优先使用该指标的 scope_filter/measure/result_factor，不要自己改成中文 LIKE。",
         "payload.retrieval_plan 是前一步模型给出的检索计划；payload.resolved_sql_resultsets 是后端按该计划读取 SQL结果集并宽松召回得到的真实目录候选行，不是最终业务数据。",
         "生成 SQL 前必须核对 payload.retrieval_plan.coverage_checklist；用户要求的每个对象都必须由 business_metric、logic_text、table_column_note、standard_qa、table_context 或 resolved_sql_resultsets 覆盖。",
@@ -2285,7 +2548,7 @@ function buildMessages(payload) {
         "如果 resolved_sql_resultsets 的 row_count=0，表示目录未召回可靠候选；不要说“前30条没有”，不要把目录未命中描述成业务数据不存在。",
         "只有当用户提到的项目不在 business_metric 里，但在 resolved_sql_resultsets 中出现时，才把它当作普通目录项处理。",
         "resolved_sql_resultsets 每项会给出 code_columns/name_columns/searchable_columns；需要编码时优先读取 code_columns 对应字段，不要假设一定叫“科目编码”；需要名称时优先读取 name_columns 对应字段，不要假设一定叫“科目名称”。",
-        "普通科目处理方式：使用返回行中的编码字段生成 account_path LIKE '%/编码/%'；如果返回行有备注且备注为需要置反，则对该项用 -SUM 或 CASE 中负向计算，备注为不需要置反则正常 SUM。",
+        "目录项处理方式必须由语义规则或 SQL结果集说明决定；如果目录返回编码、名称、备注或方向字段，要按这些证据生成过滤和符号，不要假设固定字段名或固定路径字段。",
         "如果 resolved_sql_resultsets 中有精确名称匹配，优先使用精确匹配；不要因为它不是 business_metric 就回答“未定义”。",
         "用户同时问多个项目时，应尽量在同一个 SELECT 中输出多个聚合列；每一列可以来自 business_metric 或 resolved_sql_resultsets。",
         "如果 retrieval_plan.intent=period_overview，表示这是宽泛概览问题；应根据 retrieval_plan、语义目录和表结构选择合适查询，不要求必须命中业务指标。",
@@ -2441,7 +2704,7 @@ function buildNl2SqlMessages(payload) {
         "如果 retrieval_plan.intent=period_overview 或 table_profile，说明这是宽泛概览问题；可以按已选指标生成汇总，也可以基于真实表字段生成表级统计、时间分布、行数、字段分布或样例概览。",
         "如果 retrieval_plan.intent=trend_analysis，SQL 必须保留多个期间、同比/增长列或趋势所需的时间粒度；不要压缩成单期总数。",
         "如果 retrieval_plan.semantic_plan 已给出按年、同比、分组、明细或字段分布要求，SQL 必须保留这些分析结构，不要压缩成单个总数。",
-        "如果是月度 APL/CF 类累计科目，按规则用当月累计值减上月累计值；1月直接取当月累计值。",
+        "如果语义规则声明某类指标是累计值、时点值或需要差额计算，必须按规则处理；没有规则时不要自行套用某个业务域的期间逻辑。",
         "如果是派生指标，先展开依赖指标，能写 SQL 才写；证据不足则返回 clarification_needed 或 no_evidence。",
         "SQL 只能是单条只读 SELECT；不要写 INSERT/UPDATE/DELETE/CREATE/DROP/SET/USE 等语句。",
         "全限定表名必须写成 `schema`.`table` 或直接写当前库内表名；不要写成 `schema.table`、\"schema.table\" 或 `schema.table` 这种整体加引号的形式。",
@@ -2460,7 +2723,7 @@ function buildNl2SqlMessages(payload) {
         qa_config: payload.qa_config || null,
         chat_history: payload.chat_history || [],
         conversation_context: payload.conversation_context || null,
-        data_source: payload.data_source || "bpc_consolidated_report",
+        data_source: payload.data_source || selectedPayloadTables(payload).join(", ") || catalogTables(payload).join(", "),
         semantic_catalog: payload.semantic_catalog || {},
         table_context: payload.table_context || [],
         retrieval_plan: payload.retrieval_plan || {},
@@ -3297,7 +3560,7 @@ function resultsetRowSummary(resultsets) {
   const rows = (resultsets || []).flatMap(item => item.rows || []);
   const codeColumns = [...new Set((resultsets || []).flatMap(item => item.code_columns || []))];
   const nameColumns = [...new Set((resultsets || []).flatMap(item => item.name_columns || []))];
-  const fallbackCodeColumns = ["总账科目编码", "科目编码", "account_code", "code", "racct", "saknr", "hkont", "cpmb_kgd4b76"];
+  const fallbackCodeColumns = ["总账科目编码", "科目编码", "account_code", "code", "racct", "saknr", "hkont"];
   const fallbackNameColumns = ["总账科目名称", "科目名称", "account_name", "name", "txt20", "txt30", "txt50", "txtlg", "description"];
   const finalCodeColumns = codeColumns.length ? codeColumns : fallbackCodeColumns;
   const finalNameColumns = nameColumns.length ? nameColumns : fallbackNameColumns;
@@ -3308,6 +3571,51 @@ function resultsetRowSummary(resultsets) {
     const name = rowValueByColumns(row, finalNameColumns);
     return code && name ? `${name}=${code}` : name || code || "";
   }).filter(Boolean).join("、");
+}
+
+function resolvedItemsFromResultsets(plan, resultsets = []) {
+  const terms = coverageTermsNeedingLookup(plan);
+  const items = [];
+  for (const term of terms) {
+    const normalizedTerm = normalizeCandidateText(term);
+    let best = null;
+    for (const resultset of resultsets || []) {
+      const columns = resultset.columns || Object.keys((resultset.rows || [])[0] || {});
+      const lookupColumns = {
+        codeColumns: resultset.code_columns?.length ? resultset.code_columns : resultsetLookupColumns(columns).codeColumns,
+        nameColumns: resultset.name_columns?.length ? resultset.name_columns : resultsetLookupColumns(columns).nameColumns,
+        searchableColumns: resultset.searchable_columns?.length ? resultset.searchable_columns : resultsetLookupColumns(columns).searchableColumns
+      };
+      for (const row of resultset.rows || []) {
+        const name = rowValueByColumns(row, lookupColumns.nameColumns);
+        const code = rowValueByColumns(row, lookupColumns.codeColumns);
+        const searchableValues = [...new Set([
+          name,
+          code,
+          ...lookupColumns.searchableColumns.map(column => row?.[column])
+        ].filter(value => value != null && String(value) !== "").map(String))];
+        const exact = searchableValues.some(value => normalizeCandidateText(value) === normalizedTerm);
+        const score = exact
+          ? 2
+          : Math.max(...searchableValues.map(value => scoreCandidateValue(term, value)), 0);
+        if (!best || score > best.score) {
+          const remark = String(row?.备注 || row?.remark || row?.note || "").trim();
+          const needsReverse = /需要置反/.test(remark) && !/(不需要置反|无需置反|不置反)/.test(remark);
+          best = {
+            item: term,
+            name,
+            code,
+            score,
+            resultset_key: resultset.key,
+            remark,
+            result_factor: needsReverse ? -1 : 1
+          };
+        }
+      }
+    }
+    if (best && best.score >= 0.42) items.push(best);
+  }
+  return items;
 }
 
 function sqlAliasSummary(sql) {
@@ -3449,166 +3757,26 @@ function validateRetrievalPlanAgainstCatalog(payload, plan) {
   };
 }
 
-function isBpcPayload(payload) {
-  return catalogTables(payload).includes("bpc_consolidated_report");
-}
-
 function semanticEntries(payload, type) {
   const entries = semanticCatalog(payload)[type];
   return Array.isArray(entries) ? entries : [];
 }
 
-function semanticEntrySearchText(entry) {
-  const spec = entry?.spec && typeof entry.spec === "object" ? entry.spec : {};
-  return [
-    entry?.key,
-    entry?.key_name,
-    entry?.name,
-    entry?.summary,
-    entry?.content,
-    entry?.description,
-    spec.content,
-    spec.summary,
-    spec.description,
-    spec.rule,
-    spec.requirement
-  ].filter(Boolean).join("\n");
-}
-
-function findRuleKeys(payload, patterns) {
-  const rules = semanticEntries(payload, "logic_text");
-  const keys = [];
-  patterns.forEach(pattern => {
-    const rule = rules.find(entry => pattern.test(semanticEntrySearchText(entry)));
-    if (rule?.key) keys.push(rule.key);
-  });
-  return [...new Set(keys)];
-}
-
-function bpcMandatoryRuleKeys(payload) {
-  if (!isBpcPayload(payload)) return [];
-  return findRuleKeys(payload, [
-    /BPC基础过滤与输出/,
-    /通过科目计算.*输出科目值|输出科目值.*指标值|原始科目|仅仅是指标值/
-  ]);
-}
-
-function bpcRuleRequestsMetricComponentOutput(payload, generated, mandatoryContext) {
-  if (!isBpcPayload(payload)) return false;
-  const ruleKeys = new Set([
-    ...(mandatoryContext?.rule_keys || []),
-    ...(generated?.decision?.selected_rule_keys || [])
-  ].filter(Boolean).map(String));
-  if (!ruleKeys.size) return false;
-  return semanticEntries(payload, "logic_text")
-    .filter(entry => ruleKeys.has(String(entry?.key || entry?.name || "")))
-    .some(entry => /通过科目计算.*输出科目值|输出科目值.*指标值|原始科目|仅仅是指标值/.test(semanticEntryContextText(entry)));
-}
-
-function expandSelectedMetricKeysByComponentOutputRule(payload, generated, mandatoryContext, metrics, selectedKeys) {
-  const result = [...new Set((selectedKeys || []).filter(Boolean))];
-  if (!bpcRuleRequestsMetricComponentOutput(payload, generated, mandatoryContext)) return result;
-  const addDependencies = (key, stack = []) => {
-    if (!key || stack.includes(key)) return;
-    const metric = metrics.get(key);
-    if (!metric) return;
-    metricDependencySpecs(metric).forEach(dep => {
-      if (!dep?.metricKey || !metrics.has(dep.metricKey)) return;
-      if (!result.includes(dep.metricKey)) result.push(dep.metricKey);
-      addDependencies(dep.metricKey, [...stack, key]);
-    });
-  };
-  result.forEach(key => {
-    const metric = metrics.get(key);
-    if (metricKind(metric) === "derived" || metricDependencySpecs(metric).length) {
-      addDependencies(key);
-    }
-  });
-  return result;
-}
-
-function bpcMandatoryFilters(payload, plan = null) {
-  if (!isBpcPayload(payload)) return { filters: [], warnings: [] };
-  const dataPath = payload.qa_config?.data_path?.value || "legal";
-  const transactionScope = payload.qa_config?.transaction_scope?.value || "all";
-  const filters = [
-    {
-      id: "bpc_version_f99",
-      field: "b28_s_kgdp984",
-      value: "F99",
-      sql: "b28_s_kgdp984 = 'F99'",
-      source: "BPC基础过滤与输出",
-      reason: "固定取期末余额口径"
-    },
-    {
-      id: "bpc_currency_cny",
-      field: "b28_s_kgd4kbn",
-      value: "CNY",
-      sql: "b28_s_kgd4kbn = 'CNY'",
-      source: "BPC基础过滤与输出",
-      reason: "固定人民币口径"
-    }
-  ];
-  const warnings = [];
-  filters.push({
-    id: "bpc_audit_exclusion",
-    field: "b28_s_kgdc8w9",
-    sql: "NOT (\n  b28_s_kgdc8w9 LIKE 'E%'\n  OR b28_s_kgdc8w9 LIKE 'F%'\n)",
-    source: "BPC基础过滤与输出",
-    reason: "普通查询默认排除 E/F 审计口径"
-  });
-  if (dataPath === "legal") {
-    filters.push(
-      {
-        id: "bpc_legal_actual",
-        field: "b28_s_kgdtvnx",
-        value: "ACT_LG",
-        sql: "b28_s_kgdtvnx = 'ACT_LG'",
-        source: "问数配置：法口数据",
-        reason: "法定公司代码口径"
-      },
-      {
-        id: "bpc_legal_entity",
-        field: "b28_s_kgd4rtr_kgdxoi5",
-        value: "EO_1000",
-        sql: "b28_s_kgd4rtr_kgdxoi5 = 'EO_1000'",
-        source: "问数配置：法口数据",
-        reason: "默认法口组织范围"
-      }
-    );
-  } else if (dataPath === "management") {
-    filters.push({
-      id: "bpc_management_actual",
-      field: "b28_s_kgdtvnx",
-      value: "ACT_PC",
-      sql: "b28_s_kgdtvnx = 'ACT_PC'",
-      source: "问数配置：管口数据",
-      reason: "管理利润中心口径"
-    });
-  }
-  if (transactionScope === "exclude_internal") {
-    warnings.push("已选择“不含内部关联交易数据”，但当前 BPC 语义中没有明确可强制落地的内部关联交易字段规则，本次不会编造过滤条件。");
-  }
-  const disabled = new Set((plan?.disabled_mandatory_filter_ids || []).filter(Boolean));
-  if (!disabled.size) return { filters, warnings };
-  const disabledReasons = [];
-  const enabledFilters = filters.filter(filter => {
-    if (!disabled.has(filter.id)) return true;
-    disabledReasons.push(`${filter.reason || filter.id}（${filter.id}）`);
-    return false;
-  });
-  if (disabledReasons.length) {
-    warnings.push(`本轮由模型判定不使用默认过滤：${disabledReasons.join("、")}`);
-  }
-  return { filters: enabledFilters, warnings };
-}
-
 function buildMandatoryContext(payload, plan) {
-  const ruleKeys = bpcMandatoryRuleKeys(payload);
-  const { filters, warnings } = bpcMandatoryFilters(payload, plan);
+  const semanticFilters = semanticSqlFilters(payload);
+  const ruleKeys = semanticFilters.map(item => item.rule_key).filter(Boolean);
+  const filters = [];
+  const seenFilters = new Set();
+  semanticFilters.forEach(item => {
+    const signature = sqlConditionSignature(item?.sql || "");
+    if (!signature || seenFilters.has(signature)) return;
+    seenFilters.add(signature);
+    filters.push(item);
+  });
+  const warnings = [];
   return {
     enabled: Boolean(ruleKeys.length || filters.length || warnings.length),
-    rule_keys: ruleKeys,
+    rule_keys: [...new Set(ruleKeys)],
     rule_labels: semanticEntryLabels(payload, "logic_text", ruleKeys, 8),
     sql_filters: filters,
     warnings
@@ -3635,12 +3803,16 @@ function mandatoryContextArtifact(context) {
   };
 }
 
-function enforceMandatoryContextOnGenerated(generated, context) {
+function enforceMandatoryContextOnGenerated(generated, context, payload = null) {
   const filters = context?.sql_filters || [];
   if (!filters.length || !generated?.sql) {
     return { sql: generated?.sql || "", applied: [], replaced: [], skipped: [], warnings: context?.warnings || [] };
   }
-  const enforcement = appendWhereConditions(generated.sql, filters, { targetTables: ["bpc_consolidated_report"] });
+  const targetTables = [
+    ...selectedPayloadTables(payload || {}),
+    ...catalogTables(payload || {})
+  ];
+  const enforcement = appendWhereConditions(generated.sql, filters, { targetTables });
   generated.sql = enforcement.sql;
   const forced = [...enforcement.applied, ...enforcement.replaced];
   if (forced.length) {
@@ -3674,7 +3846,7 @@ function computableMetricKeys(payload, keys = []) {
     const metric = metrics.get(key);
     if (!metric || stack.includes(key)) return false;
     if (metricKind(metric) !== "derived") {
-      return Boolean(metricSourceTable(metric) && metricMeasure(metric).field && metricScopeExpression(metric));
+      return Boolean(metricSourceTable(metric) && metricMeasure(metric).field);
     }
     const deps = metricDependencySpecs(metric);
     return Boolean(metricExpression(metric) && deps.length && deps.every(dep => canCompute(dep.metricKey, [...stack, key])));
@@ -3706,7 +3878,7 @@ function metricSourceTable(metric) {
 function metricMeasure(metric) {
   const measure = metric?.metric?.measure || metric?.measure || {};
   return {
-    field: measure.field || "b28_s_sdata",
+    field: measure.field || "",
     aggregation: String(measure.aggregation || "SUM").toUpperCase(),
     resultFactor: Number(measure.result_factor ?? 1)
   };
@@ -3820,83 +3992,6 @@ function hasAnalyticalSqlShape(sql) {
     || /同比|环比|增长率|增长额|年份|月份|季度/i.test(text);
 }
 
-function previousBpcPeriod(period) {
-  const match = String(period || "").match(/^(20\d{2})\.(0[1-9]|1[0-2])$/);
-  if (!match) return "";
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  if (month === 1) return `${year - 1}.12`;
-  return `${year}.${String(month - 1).padStart(2, "0")}`;
-}
-
-function bpcMonthIntentFromQuestion(question) {
-  const text = String(question || "");
-  const asksCumulativeMonth = /累计\s*(?:至|到)?\s*(0?[1-9]|1[0-2])\s*月|(?:截至|截止|至)\s*(0?[1-9]|1[0-2])\s*月|1\s*[-至到~～]\s*(0?[1-9]|1[0-2])\s*月/.test(text);
-  const asksOccurrenceMonth = !asksCumulativeMonth && /(本月发生额|当月发生额|月度发生额|单月发生额|本月|当月|单月|月发生额)/.test(text);
-  return { asksCumulativeMonth, asksOccurrenceMonth };
-}
-
-function bpcPeriodResult(period, rawHasMonth, question) {
-  const intent = bpcMonthIntentFromQuestion(question);
-  return {
-    period,
-    previous: previousBpcPeriod(period),
-    asksMonth: Boolean(rawHasMonth && intent.asksOccurrenceMonth),
-    asksCalendarMonth: Boolean(rawHasMonth),
-    asksCumulativeMonth: Boolean(rawHasMonth && intent.asksCumulativeMonth),
-    asksOccurrenceMonth: Boolean(rawHasMonth && intent.asksOccurrenceMonth),
-    month: period.split(".")[1] || ""
-  };
-}
-
-function bpcPeriodInfo(payload, generatedSql = "") {
-  const signals = payload?.signals || {};
-  if (signals.period) {
-    const period = String(signals.period);
-    const result = bpcPeriodResult(period, Boolean(signals.asksMonth), payload?.question || "");
-    return {
-      ...result,
-      asksMonth: Boolean(signals.asksMonth && result.asksOccurrenceMonth)
-    };
-  }
-  const question = String(payload?.question || "");
-  let match = question.match(/(20\d{2})\s*年\s*(?:累计(?:至|到)?|截至|截止|至|1\s*[-至到~～]\s*)\s*(0?[1-9]|1[0-2])\s*月/);
-  if (match) {
-    const month = String(match[2]).padStart(2, "0");
-    return bpcPeriodResult(`${match[1]}.${month}`, true, question);
-  }
-  match = question.match(/(20\d{2})\s*年\s*(?:(0?[1-9]|1[0-2])\s*月)?/);
-  if (match) {
-    const month = match[2] ? String(match[2]).padStart(2, "0") : "12";
-    const period = `${match[1]}.${month}`;
-    return bpcPeriodResult(period, Boolean(match[2]), question);
-  }
-  match = question.match(/\b(20\d{2})[.-](0?[1-9]|1[0-2])\b/);
-  if (match) {
-    const month = String(match[2]).padStart(2, "0");
-    const period = `${match[1]}.${month}`;
-    return bpcPeriodResult(period, true, question);
-  }
-  match = String(generatedSql || "").match(/\b(20\d{2})\.(0[1-9]|1[0-2])\b/);
-  if (match) {
-    const period = `${match[1]}.${match[2]}`;
-    return bpcPeriodResult(period, false, question);
-  }
-  return {
-    period: "",
-    previous: "",
-    asksMonth: false,
-    asksCalendarMonth: false,
-    asksCumulativeMonth: false,
-    asksOccurrenceMonth: false,
-    month: ""
-  };
-}
-
-function bpcMetricLooksCumulative(metric) {
-  return /account_path\s+LIKE\s+'%\/(?:APL|CF)/i.test(metricScopeExpression(metric));
-}
-
 function safeMetricAlias(key) {
   return `__${String(key || "").replace(/[^\w$]/g, "_")}`;
 }
@@ -3975,74 +4070,6 @@ function metricDependencySpecs(metric) {
     .filter(Boolean);
 }
 
-function bpcPeriodParts(period) {
-  const match = String(period || "").match(/^(20\d{2})\.(0[1-9]|1[0-2])$/);
-  if (!match) return null;
-  return { year: Number(match[1]), month: match[2] };
-}
-
-function previousYearSameBpcPeriod(period) {
-  const parts = bpcPeriodParts(period);
-  if (!parts) return "";
-  return `${parts.year - 1}.${parts.month}`;
-}
-
-function previousYearEndBpcPeriod(period) {
-  const parts = bpcPeriodParts(period);
-  if (!parts) return "";
-  return `${parts.year - 1}.12`;
-}
-
-function bpcRolePeriods(period, role, metric) {
-  const current = period.period;
-  const roleName = String(role || "current_period");
-  if (!current) return [];
-  if (roleName === "average_begin_end") {
-    return [previousYearEndBpcPeriod(current), current].filter(Boolean);
-  }
-  const target = roleName === "previous_period"
-    ? previousBpcPeriod(current)
-    : roleName === "previous_year_same_period"
-      ? previousYearSameBpcPeriod(current)
-      : roleName === "previous_year_end"
-        ? previousYearEndBpcPeriod(current)
-        : current;
-  if (!target) return [];
-  if (period.asksMonth && bpcMetricLooksCumulative(metric) && roleName !== "average_begin_end") {
-    const previous = previousBpcPeriod(target);
-    return [target, previous].filter(Boolean);
-  }
-  return [target];
-}
-
-function bpcAggregateForPeriod(metric, targetPeriod) {
-  const scope = metricScopeExpression(metric);
-  if (!scope) return null;
-  const { field, aggregation } = metricMeasure(metric);
-  if (aggregation !== "SUM") return null;
-  return `${aggregation}(CASE WHEN b28_s_kgd353d = '${targetPeriod}' AND (${scope}) THEN ${field} ELSE 0 END)`;
-}
-
-function bpcBaseRequirementExpression(metric, period, role) {
-  const { resultFactor } = metricMeasure(metric);
-  const applyFactor = expression => resultFactor === 1 ? expression : `${resultFactor} * (${expression})`;
-  const periods = bpcRolePeriods(period, role, metric);
-  if (!periods.length) return null;
-  if (String(role || "") === "average_begin_end") {
-    const expressions = periods.map(item => bpcAggregateForPeriod(metric, item));
-    if (expressions.some(item => !item)) return null;
-    return `(${expressions.map(applyFactor).join(" + ")}) / 2`;
-  }
-  const currentExpr = bpcAggregateForPeriod(metric, periods[0]);
-  if (!currentExpr) return null;
-  if (periods.length > 1) {
-    const previousExpr = bpcAggregateForPeriod(metric, periods[1]);
-    if (!previousExpr) return null;
-    return applyFactor(`(${currentExpr} - ${previousExpr})`);
-  }
-  return applyFactor(currentExpr);
-}
-
 function sqlConditionSignature(value) {
   return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -4058,661 +4085,6 @@ function uniqueSqlConditions(conditions = []) {
       seen.add(signature);
       return true;
     });
-}
-
-function bpcPeriodsFromSql(sql) {
-  const periods = new Set();
-  const re = /'((?:20\d{2})\.(?:0[1-9]|1[0-2]))'/g;
-  let match;
-  while ((match = re.exec(String(sql || "")))) periods.add(match[1]);
-  return [...periods].sort();
-}
-
-function metricLabelForQuestion(metric, question) {
-  const text = String(question || "");
-  const aliases = [metric?.name, ...(metric?.aliases || [])].filter(Boolean);
-  const matched = aliases.find(alias => alias && text.includes(alias));
-  return matched || metric?.name || metric?.key || "指标";
-}
-
-function wantsYearOverYear(payload, generated) {
-  return /同比|增长率|增长额|上年同期/i.test([
-    payload?.question,
-    generated?.answer,
-    generated?.decision?.reason,
-    ...(generated?.sql_plan || []).map(item => `${item.value || ""} ${item.note || ""}`)
-  ].filter(Boolean).join("\n"));
-}
-
-function bpcRequestedPeriods(payload, generatedSql = "") {
-  const question = String(payload?.question || "");
-  const periods = new Set();
-  const addPeriod = (year, month = "12") => {
-    if (!/^20\d{2}$/.test(String(year || ""))) return;
-    const normalizedMonth = String(month || "12").padStart(2, "0");
-    if (!/^(0[1-9]|1[0-2])$/.test(normalizedMonth)) return;
-    periods.add(`${year}.${normalizedMonth}`);
-  };
-
-  const collectFromText = value => {
-    const text = String(value || "");
-    if (!text) return;
-    let match;
-    const rangeRe = /(20\d{2})\s*年?\s*(?:至|到|~|～|-|—)\s*(20\d{2})\s*年?/g;
-    while ((match = rangeRe.exec(text))) {
-      const start = Number(match[1]);
-      const end = Number(match[2]);
-      const step = start <= end ? 1 : -1;
-      for (let year = start; step > 0 ? year <= end : year >= end; year += step) {
-        addPeriod(String(year), "12");
-      }
-    }
-
-    const cumulativeYearMonthRe = /(20\d{2})\s*年\s*(?:累计(?:至|到)?|截至|截止|至|1\s*[-至到~～]\s*)\s*(0?[1-9]|1[0-2])\s*月/g;
-    while ((match = cumulativeYearMonthRe.exec(text))) addPeriod(match[1], match[2]);
-
-    const yearMonthRe = /(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月/g;
-    while ((match = yearMonthRe.exec(text))) addPeriod(match[1], match[2]);
-
-    const dottedPeriodRe = /(^|[^\d])((?:20)\d{2})[.-](0?[1-9]|1[0-2])(?!\d)/g;
-    while ((match = dottedPeriodRe.exec(text))) addPeriod(match[2], match[3]);
-
-    const yearOnlyRe = /(20\d{2})\s*年/g;
-    while ((match = yearOnlyRe.exec(text))) {
-      const after = text.slice(match.index + match[0].length, match.index + match[0].length + 18);
-      if (/^\s*(?:累计(?:至|到)?|截至|截止|至|1\s*[-至到~～]\s*)?\s*(0?[1-9]|1[0-2])\s*月/.test(after)) continue;
-      addPeriod(match[1], "12");
-    }
-
-    const standaloneYears = [...text.matchAll(/(^|[^\d])((?:20)\d{2})(?!\d)/g)]
-      .filter(item => {
-        const yearStart = item.index + String(item[1] || "").length;
-        const after = text.slice(yearStart + 4, yearStart + 22);
-        return !/^年?\s*(?:累计(?:至|到)?|截至|截止|至|1\s*[-至到~～]\s*)?\s*(0?[1-9]|1[0-2])\s*月/.test(after);
-      })
-      .map(item => item[2]);
-    if (standaloneYears.length > 1 || /年|期间|趋势|同比|增长|对比|各年|每年/.test(text)) {
-      standaloneYears.forEach(year => addPeriod(year, "12"));
-    }
-  };
-
-  const collectFromValue = value => {
-    if (value == null) return;
-    if (typeof value === "string" || typeof value === "number") {
-      collectFromText(value);
-      return;
-    }
-    if (Array.isArray(value)) {
-      value.forEach(collectFromValue);
-      return;
-    }
-    if (typeof value === "object") {
-      [
-        value.period,
-        value.periods,
-        value.year,
-        value.years,
-        value.month,
-        value.months,
-        value.start,
-        value.end,
-        value.from,
-        value.to,
-        value.range,
-        value.value,
-        value.text,
-        value.raw
-      ].forEach(collectFromValue);
-      if (value.start_year && value.end_year) {
-        const start = Number(value.start_year);
-        const end = Number(value.end_year);
-        const step = start <= end ? 1 : -1;
-        for (let year = start; step > 0 ? year <= end : year >= end; year += step) {
-          addPeriod(String(year), value.month || value.end_month || "12");
-        }
-      }
-    }
-  };
-
-  collectFromValue(payload?.retrieval_plan?.semantic_plan?.time);
-  collectFromValue(payload?.retrieval_plan?.semantic_plan?.periods);
-  collectFromValue(payload?.retrieval_plan?.time);
-  collectFromText(question);
-
-  bpcPeriodsFromSql(generatedSql).forEach(period => periods.add(period));
-
-  if (/同比|上年同期/.test(question) && periods.size === 1) {
-    const [period] = [...periods];
-    const previous = previousYearSameBpcPeriod(period);
-    if (previous) periods.add(previous);
-  }
-
-  if (!periods.size) {
-    const single = bpcPeriodInfo(payload, generatedSql);
-    if (single.period) periods.add(single.period);
-  }
-
-  return [...periods].sort();
-}
-
-function explicitRequestedPeriods(payload) {
-  return bpcRequestedPeriods(payload, "");
-}
-
-function semanticPlanRequestsMultiPeriod(payload) {
-  const plan = payload?.retrieval_plan || {};
-  const semanticPlan = plan.semantic_plan || {};
-  const calculations = Array.isArray(semanticPlan.calculations) ? semanticPlan.calculations : [];
-  const output = Array.isArray(semanticPlan.output) ? semanticPlan.output : [];
-  const text = [
-    payload?.question,
-    plan.intent,
-    plan.summary,
-    ...calculations,
-    ...output
-  ].filter(Boolean).join("\n");
-  return explicitRequestedPeriods(payload).length > 1
-    || plan.intent === "trend_analysis"
-    || calculations.some(item => /yoy|同比|增长|趋势|变化|对比/i.test(String(item || "")))
-    || /每年|各年|逐年|趋势|同比|增长|变化|对比/.test(text);
-}
-
-function wantsMultiPeriodAnalysis(payload, generated) {
-  const text = [
-    payload?.question,
-    generated?.answer,
-    generated?.decision?.reason,
-    ...(generated?.sql_plan || []).map(item => `${item.value || ""} ${item.note || ""}`)
-  ].filter(Boolean).join("\n");
-  return semanticPlanRequestsMultiPeriod(payload)
-    || /每年|各年|逐年|期间|趋势|同比|增长|变化|对比/.test(text);
-}
-
-function uniqueMetricAlias(name, usedAliases) {
-  const base = String(name || "指标").trim() || "指标";
-  let alias = base;
-  let suffix = 2;
-  while (usedAliases.has(alias)) {
-    alias = `${base}${suffix}`;
-    suffix += 1;
-  }
-  usedAliases.add(alias);
-  return alias;
-}
-
-function buildDeterministicMultiPeriodMetricSql(payload, generated, mandatoryContext, metrics, selectedKeys, resolvedAccountItems) {
-  if (!isBpcPayload(payload) || !wantsMultiPeriodAnalysis(payload, generated)) return null;
-  const periods = bpcRequestedPeriods(payload, generated?.sql || "");
-  if (periods.length < 2) return null;
-  const selectedMetrics = selectedKeys.map(key => metrics.get(key)).filter(Boolean);
-  if (selectedKeys.length && selectedMetrics.length !== selectedKeys.length) return null;
-  if (selectedMetrics.some(metric => metricKind(metric) !== "derived" && metricSourceTable(metric) !== "bpc_consolidated_report")) return null;
-
-  const warnings = [];
-  const baseKeys = new Set();
-  const usedAliases = new Set(["期间"]);
-  const metricAliases = selectedKeys.map(key => {
-    const metric = metrics.get(key);
-    const alias = uniqueMetricAlias(metricLabelForQuestion(metric, payload?.question), usedAliases);
-    return { key, metric, alias };
-  });
-  const resolvedAliases = resolvedAccountItems.map(item => ({
-    item,
-    alias: uniqueMetricAlias(item.item, usedAliases)
-  }));
-  if (!metricAliases.length && !resolvedAliases.length) return null;
-
-  const displayFormats = [];
-  metricAliases.forEach(({ key, metric, alias }) => {
-    const presentation = metricPresentation(metric, alias, generated?.display_formats || []);
-    const displayFormat = metricDisplayFormat(metric, alias, presentation);
-    if (displayFormat) displayFormats.push({ ...displayFormat, metric_key: key });
-  });
-
-  const mandatoryFilters = (mandatoryContext?.sql_filters || [])
-    .map(item => item.sql)
-    .filter(Boolean);
-
-  const valueAliases = [...metricAliases.map(item => item.alias), ...resolvedAliases.map(item => item.alias)];
-  const questionText = String(payload?.question || "");
-  const includeGrowth = /同比|增长|趋势|变化|对比/.test(questionText);
-  const growthSuffix = /同比/.test(questionText) ? "同比增长率" : "增长率";
-  const growthAliases = includeGrowth
-    ? valueAliases.map(alias => `${alias}${growthSuffix}`)
-    : [];
-  growthAliases.forEach(alias => {
-    displayFormats.push({
-      column: alias,
-      metric_key: null,
-      format: "percent",
-      precision: 2,
-      suffix: "%",
-      scale: 100,
-      display_scale: 100,
-      scale_applied: false,
-      source: "multi_period_metric_expansion"
-    });
-  });
-
-  const groupedMetricExpressions = metricAliases.map(({ key, metric, alias }) => {
-    if (metricKind(metric) === "derived") return null;
-    if (metricSourceTable(metric) !== "bpc_consolidated_report") return null;
-    const condition = bpcSimpleMetricCondition(metric);
-    const expression = bpcSimpleAggregateExpression(condition, metricMeasure(metric), alias);
-    if (expression) baseKeys.add(key);
-    return expression;
-  });
-  const groupedResolvedExpressions = resolvedAliases.map(({ item, alias }) => {
-    const expression = bpcResolvedAccountGroupedExpression(item, alias);
-    if (expression) baseKeys.add(item.item);
-    return expression;
-  });
-  const canUseGroupedScan = groupedMetricExpressions.every(Boolean) && groupedResolvedExpressions.every(Boolean);
-  if (canUseGroupedScan) {
-    const whereLines = uniqueSqlConditions([
-      `b28_s_kgd353d IN (${periods.map(sqlLiteral).join(", ")})`,
-      ...mandatoryFilters
-    ]);
-    const innerSql = [
-      "SELECT",
-      [
-        "  b28_s_kgd353d AS `期间`",
-        ...groupedMetricExpressions,
-        ...groupedResolvedExpressions
-      ].join(",\n"),
-      `FROM ${quotedTableName("bpc_consolidated_report")}`,
-      "WHERE",
-      whereLines.map(formatWhereConditionLine).join("\n"),
-      "GROUP BY b28_s_kgd353d"
-    ].join("\n");
-
-    const outerSelectLines = [
-      "  `期间`",
-      ...valueAliases.map(alias => `  \`${alias}\``)
-    ];
-    if (includeGrowth) {
-      valueAliases.forEach(alias => {
-        outerSelectLines.push([
-          "  CASE",
-          `    WHEN LAG(\`${alias}\`) OVER (ORDER BY \`期间\`) IS NULL OR LAG(\`${alias}\`) OVER (ORDER BY \`期间\`) = 0 THEN NULL`,
-          `    ELSE (\`${alias}\` - LAG(\`${alias}\`) OVER (ORDER BY \`期间\`)) / LAG(\`${alias}\`) OVER (ORDER BY \`期间\`)`,
-          `  END AS \`${alias}${growthSuffix}\``
-        ].join("\n"));
-      });
-    }
-
-    const sql = includeGrowth
-      ? [
-          "WITH period_metrics AS (",
-          innerSql.split("\n").map(line => `  ${line}`).join("\n"),
-          ")",
-          "SELECT",
-          outerSelectLines.join(",\n"),
-          "FROM period_metrics",
-          "ORDER BY `期间`"
-        ].join("\n")
-      : [
-          innerSql,
-          "ORDER BY `期间`"
-        ].join("\n");
-
-    return {
-      sql,
-      selectedKeys,
-      baseKeys: [...baseKeys],
-      periods,
-      displayFormats,
-      includeGrowth,
-      warnings
-    };
-  }
-
-  const resolveMetricExpressionForPeriod = (key, periodInfo, periodValues, dep = {}, stack = []) => {
-    const metric = metrics.get(key);
-    if (!metric || stack.includes(key)) return null;
-    if (metricKind(metric) !== "derived") {
-      const role = dep.periodRole || dep.period_role || "current_period";
-      bpcRolePeriods(periodInfo, role, metric).forEach(item => periodValues.add(item));
-      baseKeys.add(key);
-      return bpcBaseRequirementExpression(metric, periodInfo, role);
-    }
-    const deps = metricDependencySpecs(metric);
-    if (!deps.length) return null;
-    const replacements = new Map();
-    for (const child of deps) {
-      const childExpression = resolveMetricExpressionForPeriod(child.metricKey, periodInfo, periodValues, child, [...stack, key]);
-      if (!childExpression) return null;
-      replacements.set(child.variable || child.metricKey, `(${childExpression})`);
-      replacements.set(child.metricKey, `(${childExpression})`);
-    }
-    const formula = metricExpression(metric);
-    const expression = replaceMetricTokens(formula, replacements);
-    if (!expression || unresolvedMetricFormulaTokens(formula, replacements).length) return null;
-    baseKeys.add(key);
-    return expression;
-  };
-
-  const periodQueries = periods.map(periodValue => {
-    const periodInfo = {
-      period: periodValue,
-      previous: previousBpcPeriod(periodValue),
-      asksMonth: false,
-      month: periodValue.split(".")[1] || "12"
-    };
-    const periodValues = new Set([periodValue]);
-    const selectLines = [`  ${sqlLiteral(periodValue)} AS \`期间\``];
-    for (const { key, alias } of metricAliases) {
-      const expression = resolveMetricExpressionForPeriod(key, periodInfo, periodValues, { variable: key, periodRole: "current_period" });
-      if (!expression) return null;
-      selectLines.push(`  ${expression} AS \`${alias}\``);
-    }
-    for (const { item, alias } of resolvedAliases) {
-      const expression = bpcResolvedAccountExpression(item, periodInfo);
-      if (!expression) return null;
-      periodValues.add(periodValue);
-      baseKeys.add(item.item);
-      selectLines.push(`  ${expression} AS \`${alias}\``);
-    }
-    const whereLines = uniqueSqlConditions([
-      `b28_s_kgd353d IN (${[...periodValues].filter(Boolean).sort().map(sqlLiteral).join(", ")})`,
-      ...mandatoryFilters
-    ]);
-    return [
-      "SELECT",
-      selectLines.join(",\n"),
-      `FROM ${quotedTableName("bpc_consolidated_report")}`,
-      "WHERE",
-      whereLines.map(formatWhereConditionLine).join("\n")
-    ].join("\n");
-  });
-
-  if (periodQueries.some(item => !item)) return null;
-  const outerSelectLines = [
-    "  `期间`",
-    ...valueAliases.map(alias => `  \`${alias}\``)
-  ];
-  if (includeGrowth) {
-    valueAliases
-      .forEach(alias => {
-        outerSelectLines.push([
-          "  CASE",
-          `    WHEN LAG(\`${alias}\`) OVER (ORDER BY \`期间\`) IS NULL OR LAG(\`${alias}\`) OVER (ORDER BY \`期间\`) = 0 THEN NULL`,
-          `    ELSE (\`${alias}\` - LAG(\`${alias}\`) OVER (ORDER BY \`期间\`)) / LAG(\`${alias}\`) OVER (ORDER BY \`期间\`)`,
-          `  END AS \`${alias}${growthSuffix}\``
-        ].join("\n"));
-      });
-  }
-
-  const sql = [
-    "WITH period_metrics AS (",
-    periodQueries.map(query => query.split("\n").map(line => `  ${line}`).join("\n")).join("\n  UNION ALL\n"),
-    ")",
-    "SELECT",
-    outerSelectLines.join(",\n"),
-    "FROM period_metrics",
-    "ORDER BY `期间`"
-  ].join("\n");
-
-  return {
-    sql,
-    selectedKeys,
-    baseKeys: [...baseKeys],
-    periods,
-    displayFormats,
-    includeGrowth,
-    warnings
-  };
-}
-
-function multiPeriodReadiness(payload, generated, metrics, selectedKeys, resolvedAccountItems) {
-  const periods = bpcRequestedPeriods(payload, generated?.sql || "");
-  const selectedMetrics = selectedKeys.map(key => metrics.get(key)).filter(Boolean);
-  const reasons = [];
-  if (!isBpcPayload(payload)) reasons.push("not_bpc_payload");
-  if (!wantsMultiPeriodAnalysis(payload, generated)) reasons.push("not_multi_period_question");
-  if (periods.length < 2) reasons.push(`period_count_${periods.length}`);
-  if (selectedKeys.length && selectedMetrics.length !== selectedKeys.length) reasons.push("missing_selected_metric");
-  const unsupportedMetric = selectedMetrics.find(metric => metricKind(metric) !== "derived" && metricSourceTable(metric) !== "bpc_consolidated_report");
-  if (unsupportedMetric) reasons.push(`unsupported_source_table:${unsupportedMetric.key || unsupportedMetric.name || ""}:${metricSourceTable(unsupportedMetric) || "empty"}`);
-  if (!selectedKeys.length && !resolvedAccountItems.length) reasons.push("no_metric_or_resolved_account");
-  return {
-    wants_multi_period: wantsMultiPeriodAnalysis(payload, generated),
-    periods,
-    selected_keys: selectedKeys,
-    selected_metric_kinds: selectedKeys.map(key => {
-      const metric = metrics.get(key);
-      return {
-        key,
-        kind: metric ? metricKind(metric) : "missing",
-        source_table: metric ? metricSourceTable(metric) : "",
-        dependency_count: metric ? metricDependencySpecs(metric).length : 0,
-        expression: metric ? metricExpression(metric) : ""
-      };
-    }),
-    resolved_account_count: resolvedAccountItems.length,
-    reasons
-  };
-}
-
-function buildDeterministicAnalyticalMetricSql(payload, generated, mandatoryContext) {
-  if (!hasAnalyticalSqlShape(generated?.sql)) return null;
-  const selectedKeys = [...new Set([
-    generated?.decision?.selected_metric_key,
-    ...(generated?.decision?.selected_metric_keys || [])
-  ].filter(Boolean))];
-  if (selectedKeys.length !== 1) return null;
-  const metrics = metricCatalogMap(payload);
-  const metric = metrics.get(selectedKeys[0]);
-  if (!metric || metricKind(metric) === "derived") return null;
-  if (metricSourceTable(metric) !== "bpc_consolidated_report") return null;
-  const periods = bpcPeriodsFromSql(generated.sql);
-  if (periods.length < 2) return null;
-  const { field, aggregation, resultFactor } = metricMeasure(metric);
-  if (aggregation !== "SUM" || !field) return null;
-  const scope = metricScopeExpression(metric);
-  if (!scope) return null;
-  const valueColumn = metricLabelForQuestion(metric, payload?.question);
-  const includeYoy = wantsYearOverYear(payload, generated);
-  const mandatoryFilters = (mandatoryContext?.sql_filters || [])
-    .filter(item => !(item?.field && hasFieldReference(scope, item.field)))
-    .map(item => item.sql)
-    .filter(Boolean);
-  const whereConditions = uniqueSqlConditions([
-    `b28_s_kgd353d IN (${periods.map(sqlLiteral).join(", ")})`,
-    scope,
-    ...mandatoryFilters
-  ]);
-  const factorPrefix = resultFactor === 1 ? "" : `${resultFactor} * `;
-  const withSql = [
-    "WITH metric_by_year AS (",
-    "  SELECT",
-    "    SUBSTRING(b28_s_kgd353d, 1, 4) AS `年份`,",
-    `    ${factorPrefix}${aggregation}(${field}) AS \`${valueColumn}\``,
-    `  FROM ${quotedTableName("bpc_consolidated_report")}`,
-    "  WHERE",
-    whereConditions.map((line, index) => `    ${index ? "AND " : ""}${line}`).join("\n"),
-    "  GROUP BY SUBSTRING(b28_s_kgd353d, 1, 4)",
-    ")"
-  ].join("\n");
-  const selectLines = [
-    "SELECT",
-    "  `年份`,",
-    `  \`${valueColumn}\``
-  ];
-  const displayFormats = [];
-  if (includeYoy) {
-    selectLines.push(
-      "  ,CASE",
-      `    WHEN LAG(\`${valueColumn}\`) OVER (ORDER BY \`年份\`) IS NULL OR LAG(\`${valueColumn}\`) OVER (ORDER BY \`年份\`) = 0 THEN NULL`,
-      `    ELSE (\`${valueColumn}\` - LAG(\`${valueColumn}\`) OVER (ORDER BY \`年份\`)) / LAG(\`${valueColumn}\`) OVER (ORDER BY \`年份\`)`,
-      "  END AS `同比增长率`"
-    );
-    displayFormats.push({
-      column: "同比增长率",
-      metric_key: null,
-      format: "percent",
-      precision: 2,
-      suffix: "%",
-      scale: 100,
-      display_scale: 100,
-      scale_applied: false,
-      source: "analytical_metric_expansion"
-    });
-  }
-  const sql = [
-    withSql,
-    selectLines.join("\n"),
-    "FROM metric_by_year",
-    "ORDER BY `年份`"
-  ].join("\n");
-  return {
-    sql,
-    selectedKeys,
-    baseKeys: selectedKeys,
-    periods,
-    displayFormats,
-    valueColumn,
-    includeYoy
-  };
-}
-
-function resolvedAccountItemsFromPayload(payload) {
-  if (!isBpcPayload(payload)) return [];
-  const checklist = normalizeCoverageChecklist(payload?.retrieval_plan?.coverage_checklist || []);
-  const resolved = Array.isArray(payload?.resolved_sql_resultsets) ? payload.resolved_sql_resultsets : [];
-  const items = [];
-  for (const coverage of checklist) {
-    if (!coverage.item) continue;
-    const itemType = String(coverage.item_type || "").trim();
-    if (coverage.evidence_type === "business_metric") continue;
-    if (!["sql_resultset", "none", ""].includes(coverage.evidence_type)) continue;
-    if (!["metric", "object", "rule", ""].includes(itemType)) continue;
-    const resultsets = resolved.filter(resultset => {
-      if (coverage.evidence_key) return resultset.key === coverage.evidence_key;
-      return true;
-    });
-    for (const resultset of resultsets) {
-      const codeColumns = resultset.code_columns?.length
-        ? resultset.code_columns
-        : ["科目编码", "account_code", "code", "racct", "saknr", "hkont", "cpmb_kgd4b76"];
-      const nameColumns = resultset.name_columns?.length
-        ? resultset.name_columns
-        : ["科目名称", "account_name", "name", "txtlg", "txt20", "txt30", "description"];
-      const rows = Array.isArray(resultset.rows) ? resultset.rows : [];
-      const scoredRows = rows.map(row => {
-        const name = rowValueByColumns(row, nameColumns);
-        const code = rowValueByColumns(row, codeColumns);
-        const exactName = normalizeCandidateText(name) === normalizeCandidateText(coverage.item);
-        const matchScore = Number(row?._match_score || scoreCandidateValue(coverage.item, name));
-        return { row, name, code, score: exactName ? 2 : matchScore };
-      }).filter(item => item.code && item.name);
-      scoredRows.sort((a, b) => b.score - a.score);
-      const best = scoredRows[0];
-      if (!best) continue;
-      const minimumScore = coverage.evidence_type === "sql_resultset" ? 0.42 : 0.78;
-      if (best.score < minimumScore) continue;
-      const remark = String(best.row?.备注 || best.row?.remark || best.row?.note || "").trim();
-      const needsReverse = /需要置反/.test(remark) && !/(不需要置反|无需置反|不置反)/.test(remark);
-      items.push({
-        item: coverage.item,
-        code: String(best.code).trim(),
-        name: String(best.name).trim(),
-        result_factor: needsReverse ? -1 : 1,
-        remark,
-        resultset_key: resultset.key,
-        match_score: best.score
-      });
-      break;
-    }
-  }
-  const unique = new Map();
-  for (const item of items) {
-    const key = `${item.item}::${item.code}`;
-    if (!unique.has(key)) unique.set(key, item);
-  }
-  return [...unique.values()];
-}
-
-function bpcResolvedAccountExpression(item, period) {
-  const code = String(item?.code || "").trim();
-  if (!code || !period?.period) return null;
-  const factor = Number(item.result_factor || 1);
-  const condition = `account_path LIKE ${sqlLiteral(`%/${code}/%`)}`;
-  const current = `SUM(CASE WHEN b28_s_kgd353d = ${sqlLiteral(period.period)} AND ${condition} THEN b28_s_sdata ELSE 0 END)`;
-  const prefix = factor === 1 ? "" : `${factor} * `;
-  if (period.asksMonth && period.previous && /^(APL|CF)/i.test(code)) {
-    const previous = `SUM(CASE WHEN b28_s_kgd353d = ${sqlLiteral(period.previous)} AND ${condition} THEN b28_s_sdata ELSE 0 END)`;
-    return `${prefix}(${current} - ${previous})`;
-  }
-  return `${prefix}${current}`;
-}
-
-function bpcResolvedAccountGroupedExpression(item, alias) {
-  const code = String(item?.code || "").trim();
-  if (!code) return null;
-  const factor = Number(item.result_factor || 1);
-  const condition = `account_path LIKE ${sqlLiteral(`%/${code}/%`)}`;
-  const aggregate = `SUM(CASE WHEN ${condition} THEN b28_s_sdata ELSE 0 END)`;
-  const expression = factor === 1
-    ? aggregate
-    : factor === -1
-      ? `- ${aggregate}`
-      : `${factor} * (${aggregate})`;
-  return `  ${expression} AS \`${alias}\``;
-}
-
-function bpcResolvedAccountCondition(item) {
-  const code = String(item?.code || "").trim();
-  if (!code) return null;
-  return `account_path LIKE ${sqlLiteral(`%/${code}/%`)}`;
-}
-
-function bpcSimpleMetricCondition(metric) {
-  const scope = metricScopeExpression(metric);
-  if (!scope) return null;
-  const accountMatches = [...scope.matchAll(/`?account_path`?\s+LIKE\s+'[^']+'/gi)]
-    .map(match => match[0].replace(/`/g, ""));
-  if (accountMatches.length !== 1) return null;
-
-  const allowedFields = new Set([
-    "account_path",
-    "b28_s_kgd353d",
-    "b28_s_kgdp984",
-    "b28_s_kgd4kbn",
-    "b28_s_kgdc8w9",
-    "b28_s_kgdtvnx",
-    "b28_s_kgd4rtr_kgdxoi5",
-    "b28_s_kgdbveh"
-  ]);
-  const referencedFields = [...scope.matchAll(/`?(account_path|b28_s_[A-Za-z0-9_]+)`?\s*(?:=|<>|!=|LIKE|NOT\s+LIKE|IN|NOT\s+IN)\b/gi)]
-    .map(match => match[1]);
-  if (referencedFields.some(field => !allowedFields.has(field))) return null;
-
-  const specialConditions = [...scope.matchAll(/`?b28_s_kgdbveh`?\s*(?:=|IN|LIKE|NOT\s+LIKE)\s*(?:'[^']*'|\([^)]+\))/gi)]
-    .map(match => match[0].replace(/`/g, ""));
-  const parts = uniqueSqlConditions([accountMatches[0], ...specialConditions]);
-  if (!parts.length) return null;
-  return parts.length === 1 ? parts[0] : `(${parts.join(" AND ")})`;
-}
-
-function bpcSimpleAggregateExpression(condition, measure, alias) {
-  if (!condition || !measure?.field || measure.aggregation !== "SUM") return null;
-  const aggregate = `SUM(CASE WHEN ${condition} THEN ${measure.field} ELSE 0 END)`;
-  const factor = Number(measure.resultFactor || 1);
-  const expression = factor === 1
-    ? aggregate
-    : factor === -1
-      ? `- ${aggregate}`
-      : `${factor} * (${aggregate})`;
-  return `  ${expression} AS \`${alias}\``;
-}
-
-function formatWhereConditionLine(condition, index) {
-  const prefix = index ? "AND " : "";
-  return String(condition || "")
-    .split(/\r?\n/)
-    .map((line, lineIndex) => `  ${lineIndex ? "    " : prefix}${line}`)
-    .join("\n");
 }
 
 function metricMatchNames(metric) {
@@ -4771,8 +4143,13 @@ function metricMatchesCoverageItem(metric, item) {
 function filterSelectedMetricKeysByCoverage(payload, metrics, selectedKeys) {
   const checklist = normalizeCoverageChecklist(payload?.retrieval_plan?.coverage_checklist || []);
   const items = checklist.map(item => item.item).filter(Boolean);
+  const plannedKeys = new Set([
+    ...(payload?.retrieval_plan?.semantic_plan?.metrics || []),
+    ...(payload?.retrieval_plan?.selected_metric_keys || [])
+  ].filter(Boolean).map(String));
   if (!items.length) return selectedKeys;
   const filtered = selectedKeys.filter(key => {
+    if (plannedKeys.has(String(key))) return true;
     const metric = metrics.get(key);
     if (!metric) return false;
     return items.some(item => metricMatchesCoverageItem(metric, item));
@@ -4785,7 +4162,7 @@ function warningContradictsResolvedItems(warning, resolvedItems = []) {
   return resolvedItems.some(item => {
     const name = String(item?.item || "").trim();
     if (!name || !text.includes(name)) return false;
-    return /(未在|未定义|未找到|缺少|缺失|无法|不能|推断|可能|猜测|ABS02)/.test(text);
+    return /(未在|未定义|未找到|缺少|缺失|无法|不能|推断|可能|猜测)/.test(text);
   });
 }
 
@@ -4823,71 +4200,311 @@ function warningContradictsResolvedLookupEvidence(warning, payload, execution = 
   return /(指标|业务指标|语义|目录|结果集|映射|编码|科目|枚举|规则|口径|依据|证据)/.test(text);
 }
 
-function buildSimpleBpcMetricSql({ payload, generated, mandatoryContext, metrics, selectedKeys, selectedMetrics, resolvedAccountItems, period }) {
-  if (!isBpcPayload(payload) || !period?.period) return null;
-  if (period.asksMonth) return null;
+function directoryLookupConditionTemplate(payload) {
+  const text = semanticEntries(payload, "logic_text")
+    .map(entry => semanticEntryContextText(entry))
+    .join("\n");
+  const match = text.match(/`?([A-Za-z_][\w$]*)`?\s+LIKE\s+'%\/(?:科目编码|编码|code|CODE)\/%'/i)
+    || text.match(/`?([A-Za-z_][\w$]*)`?\s+LIKE\s+['"][^'"]*(?:科目编码|编码|code|CODE)[^'"]*['"]/i);
+  if (!match) return null;
+  return {
+    field: match[1],
+    build: code => `${sqlIdentifier(match[1])} LIKE ${sqlLiteral(`%/${code}/%`)}`
+  };
+}
 
-  const selectLines = [];
+function sourceMeasureField(metrics, sourceTable) {
+  const fields = [...new Set([...metrics.values()]
+    .filter(metric => metricKind(metric) !== "derived" && metricSourceTable(metric) === sourceTable)
+    .map(metric => metricMeasure(metric).field)
+    .filter(Boolean)
+    .filter(field => field !== "*"))];
+  return fields.length === 1 ? fields[0] : fields[0] || "";
+}
+
+function directoryLookupMeasureField(payload, metrics, sourceTable) {
+  const text = semanticEntries(payload, "logic_text")
+    .map(entry => semanticEntryContextText(entry))
+    .join("\n");
+  const match = text.match(/(?:金额字段|数值字段|度量字段|measure\s*field)\s*[：:]\s*`?([A-Za-z_][\w$]*)`?/i);
+  return match?.[1] || sourceMeasureField(metrics, sourceTable);
+}
+
+function genericResolvedLookupExpression(payload, metrics, sourceTable, item) {
+  const code = String(item?.code || "").trim();
+  if (!code) return null;
+  const template = directoryLookupConditionTemplate(payload);
+  const measureField = directoryLookupMeasureField(payload, metrics, sourceTable);
+  if (!template || !measureField) return null;
+  const condition = template.build(code);
+  const aggregate = `SUM(CASE WHEN ${condition} THEN ${sqlIdentifier(measureField)} ELSE 0 END)`;
+  const factor = Number(item.result_factor || 1);
+  if (factor === 1) return aggregate;
+  if (factor === -1) return `-(${aggregate})`;
+  return `${factor} * (${aggregate})`;
+}
+
+function genericAggregateExpression(metric, extraCondition = "") {
+  const measure = metricMeasure(metric);
+  if (!measure.field || !measure.aggregation) return null;
+  const field = measure.field === "*" ? "*" : sqlIdentifier(measure.field);
+  const aggregation = String(measure.aggregation || "SUM").toUpperCase();
+  const scope = metricScopeExpression(metric);
+  const combinedScope = [extraCondition, scope].filter(Boolean).join(" AND ");
+  let expression = "";
+  if (aggregation === "SUM") {
+    expression = combinedScope
+      ? `SUM(CASE WHEN ${combinedScope} THEN ${field} ELSE 0 END)`
+      : `SUM(${field})`;
+  } else if (aggregation === "COUNT") {
+    expression = combinedScope
+      ? `SUM(CASE WHEN ${combinedScope} THEN 1 ELSE 0 END)`
+      : `COUNT(${field})`;
+  } else if (["AVG", "MIN", "MAX"].includes(aggregation)) {
+    expression = combinedScope
+      ? `${aggregation}(CASE WHEN ${combinedScope} THEN ${field} ELSE NULL END)`
+      : `${aggregation}(${field})`;
+  } else {
+    return null;
+  }
+  const factor = Number(measure.resultFactor || 1);
+  if (factor === 1) return expression;
+  if (factor === -1) return `-(${expression})`;
+  return `${factor} * (${expression})`;
+}
+
+function buildGenericDeterministicMetricSql(payload, generated, mandatoryContext, metrics, selectedKeys, resolvedItems = []) {
+  if (!selectedKeys.length && !resolvedItems.length) return null;
+  const baseRequirements = new Map();
+  const sourceTables = new Set();
+  const additionalTimeValues = new Set();
+  const fallbackSourceTable = () => [...sourceTables][0] || selectedPayloadTables(payload)[0] || catalogTables(payload)[0] || "";
+
+  const aggregateForRole = (metric, sourceTable, roleName, scopedToPeriod) => {
+    const timeField = genericYearColumn(payload, sourceTable);
+    const times = genericRequestedTimeValues(payload, sourceTable);
+    const current = times[times.length - 1] || "";
+    const expressionAt = value => {
+      if (!timeField || !value) return genericAggregateExpression(metric);
+      additionalTimeValues.add(value);
+      return genericAggregateExpression(metric, `${sqlIdentifier(timeField)} = ${sqlLiteral(value)}`);
+    };
+    if (roleName === "average_begin_end" && current) {
+      const previous = previousYearEndGenericTimeValue(current);
+      if (!previous) return null;
+      const previousExpression = expressionAt(previous);
+      const currentExpression = expressionAt(current);
+      if (!previousExpression || !currentExpression) return null;
+      return `(${previousExpression} + ${currentExpression}) / 2`;
+    }
+    if (roleName === "previous_year_end" && current) return expressionAt(previousYearEndGenericTimeValue(current));
+    if (scopedToPeriod && current && times.length <= 1) return expressionAt(current);
+    return genericAggregateExpression(metric);
+  };
+
+  const addBaseRequirement = (key, dep = {}) => {
+    const metric = metrics.get(key);
+    if (!metric || metricKind(metric) === "derived") return null;
+    const sourceTable = metricSourceTable(metric);
+    if (!sourceTable) return null;
+    const roleName = String(dep.periodRole || dep.period_role || "current_period");
+    const scopedToPeriod = Boolean(dep.periodRole || dep.period_role || dep.variable || dep.alias);
+    const expression = aggregateForRole(metric, sourceTable, roleName, scopedToPeriod);
+    if (!expression) return null;
+    const requirementKey = `${key}::${roleName}::${dep.variable || dep.alias || key}`;
+    const alias = safeMetricAlias(`generic__${requirementKey}`);
+    if (!baseRequirements.has(requirementKey)) {
+      baseRequirements.set(requirementKey, { key, metric, sourceTable, alias, expression });
+      sourceTables.add(sourceTable);
+    }
+    return sqlIdentifier(baseRequirements.get(requirementKey).alias);
+  };
+
+  const addResolvedRequirement = item => {
+    const sourceTable = fallbackSourceTable();
+    if (!sourceTable) return null;
+    const expression = genericResolvedLookupExpression(payload, metrics, sourceTable, item);
+    if (!expression) return null;
+    const alias = safeMetricAlias(`lookup__${item.code || item.item}`);
+    const key = `lookup::${item.item}::${item.code || ""}`;
+    if (!baseRequirements.has(key)) {
+      baseRequirements.set(key, { key, metric: null, sourceTable, alias, expression });
+      sourceTables.add(sourceTable);
+    }
+    return sqlIdentifier(baseRequirements.get(key).alias);
+  };
+
+  const resolveMetricExpression = (key, depSpec = {}, stack = []) => {
+    const metric = metrics.get(key);
+    if (!metric || stack.includes(key)) return null;
+    if (metricKind(metric) !== "derived") return addBaseRequirement(key, depSpec);
+    const deps = metricDependencySpecs(metric);
+    if (!deps.length) return null;
+    const replacements = new Map();
+    for (const dep of deps) {
+      const childExpression = resolveMetricExpression(dep.metricKey, dep, [...stack, key]);
+      if (!childExpression) return null;
+      replacements.set(dep.variable || dep.metricKey, `(${childExpression})`);
+      replacements.set(dep.metricKey, `(${childExpression})`);
+    }
+    const formula = metricExpression(metric);
+    const expression = replaceMetricTokens(formula, replacements);
+    if (!expression || unresolvedMetricFormulaTokens(formula, replacements).length) return null;
+    return expression;
+  };
+
+  const outputColumns = [];
   const displayFormats = [];
-  const baseKeys = [];
-
   for (const key of selectedKeys) {
     const metric = metrics.get(key);
     if (!metric) return null;
-    if (metricKind(metric) === "derived") return null;
-    if (metricSourceTable(metric) !== "bpc_consolidated_report") return null;
-    const condition = bpcSimpleMetricCondition(metric);
-    if (!condition) return null;
     const name = metric.name || key;
-    const measure = metricMeasure(metric);
-    const selectLine = bpcSimpleAggregateExpression(condition, measure, name);
-    if (!selectLine) return null;
+    const expression = resolveMetricExpression(key);
+    if (!expression) return null;
     const presentation = metricPresentation(metric, name, generated?.display_formats || []);
     const displayFormat = metricDisplayFormat(metric, name, presentation);
     if (displayFormat) displayFormats.push(displayFormat);
-    selectLines.push(selectLine);
-    baseKeys.push(key);
+    outputColumns.push({ key, metric, name, expression: applyMetricPresentationToSql(expression, presentation) });
   }
-
-  for (const item of resolvedAccountItems) {
-    const condition = bpcResolvedAccountCondition(item);
-    const measure = {
-      field: "b28_s_sdata",
-      aggregation: "SUM",
-      resultFactor: Number(item.result_factor || 1)
-    };
-    const selectLine = bpcSimpleAggregateExpression(condition, measure, item.item);
-    if (!selectLine) continue;
-    selectLines.push(selectLine);
-    baseKeys.push(item.item);
+  for (const item of resolvedItems) {
+    const expression = addResolvedRequirement(item);
+    if (!expression) continue;
+    const name = item.item || item.name || item.code;
+    if (!name || outputColumns.some(column => column.name === name)) continue;
+    outputColumns.push({ key: `lookup::${item.code || name}`, metric: null, name, expression });
   }
+  if (selectedKeys.length === 1 && metricKind(metrics.get(selectedKeys[0])) === "derived") {
+    for (const item of baseRequirements.values()) {
+      if (selectedKeys.includes(item.key)) continue;
+      const name = item.metric?.name || item.key;
+      if (outputColumns.some(column => column.name === name)) continue;
+      outputColumns.push({
+        key: item.key,
+        metric: item.metric,
+        name,
+        expression: sqlIdentifier(item.alias)
+      });
+    }
+  }
+  if (!outputColumns.length || !baseRequirements.size || sourceTables.size !== 1) return null;
 
-  if (!selectLines.length) return null;
-  if (selectedMetrics.some(metric => metricSourceTable(metric) !== "bpc_consolidated_report")) return null;
-
-  const mandatoryFilters = (mandatoryContext?.sql_filters || [])
-    .map(item => item.sql)
-    .filter(Boolean);
+  const sourceTable = [...sourceTables][0];
+  const timeField = genericYearColumn(payload, sourceTable);
+  const requestedTimes = genericRequestedTimeValues(payload, sourceTable);
+  const roleTimeFilters = timeField && additionalTimeValues.size
+    ? [{
+        sql: `${sqlIdentifier(timeField)} IN (${[...additionalTimeValues].sort().map(sqlLiteral).join(", ")})`
+      }]
+    : [];
   const whereLines = uniqueSqlConditions([
-    `b28_s_kgd353d = ${sqlLiteral(period.period)}`,
-    ...mandatoryFilters
+    ...(roleTimeFilters.length ? roleTimeFilters : genericTimeSqlFilters(payload, sourceTable)).map(item => item.sql),
+    ...(mandatoryContext?.sql_filters || [])
+      .map(item => item.sql)
   ]);
-  if (!whereLines.length) return null;
-
+  const innerSelects = [...baseRequirements.values()]
+    .map(item => `    ${item.expression} AS ${sqlIdentifier(item.alias)}`);
+  const wantsYoy = /yoy|同比|增长|趋势|变化|对比/i.test([
+    payload?.question,
+    payload?.retrieval_plan?.intent,
+    payload?.retrieval_plan?.summary,
+    ...(payload?.retrieval_plan?.semantic_plan?.calculations || []),
+    ...(payload?.retrieval_plan?.semantic_plan?.output || [])
+  ].filter(Boolean).join("\n"));
+  if (timeField && requestedTimes.length > 1) {
+    const periodWhereLines = uniqueSqlConditions([
+      `${sqlIdentifier(timeField)} IN (${requestedTimes.map(sqlLiteral).join(", ")})`,
+      ...(mandatoryContext?.sql_filters || []).map(item => item.sql)
+    ]);
+    const periodBaseSql = [
+      "period_base AS (",
+      "  SELECT",
+      [
+        `    ${sqlIdentifier(timeField)} AS ${sqlIdentifier("__period")}`,
+        ...innerSelects
+      ].join(",\n"),
+      `  FROM ${quotedTableName(sourceTable)}`,
+      "  WHERE",
+      periodWhereLines.map((line, index) => `    ${index ? "AND " : ""}${line}`).join("\n"),
+      `  GROUP BY ${sqlIdentifier(timeField)}`,
+      ")"
+    ].join("\n");
+    const metricSql = [
+      "period_metrics AS (",
+      "  SELECT",
+      [
+        `    ${sqlIdentifier("__period")} AS ${sqlIdentifier("期间")}`,
+        ...outputColumns.map(column => `    ${column.expression} AS ${sqlIdentifier(column.name)}`)
+      ].join(",\n"),
+      "  FROM period_base",
+      ")"
+    ].join("\n");
+    const finalSelects = [
+      `  ${sqlIdentifier("期间")}`,
+      ...outputColumns.map(column => `  ${sqlIdentifier(column.name)}`)
+    ];
+    if (wantsYoy) {
+      outputColumns.forEach(column => {
+        const yoyName = `${column.name}同比增长率`;
+        finalSelects.push([
+          "  CASE",
+          `    WHEN LAG(${sqlIdentifier(column.name)}) OVER (ORDER BY ${sqlIdentifier("期间")}) IS NULL OR LAG(${sqlIdentifier(column.name)}) OVER (ORDER BY ${sqlIdentifier("期间")}) = 0 THEN NULL`,
+          `    ELSE (${sqlIdentifier(column.name)} - LAG(${sqlIdentifier(column.name)}) OVER (ORDER BY ${sqlIdentifier("期间")})) / LAG(${sqlIdentifier(column.name)}) OVER (ORDER BY ${sqlIdentifier("期间")})`,
+          `  END AS ${sqlIdentifier(yoyName)}`
+        ].join("\n"));
+        displayFormats.push({
+          column: yoyName,
+          metric_key: null,
+          format: "percent",
+          precision: 2,
+          suffix: "%",
+          scale: 100,
+          display_scale: 100,
+          scale_applied: false,
+          source: "generic_time_series"
+        });
+      });
+    }
+    const sql = [
+      "WITH",
+      periodBaseSql,
+      ",",
+      metricSql,
+      "SELECT",
+      finalSelects.join(",\n"),
+      "FROM period_metrics",
+      `ORDER BY ${sqlIdentifier("期间")}`
+    ].join("\n");
+    return {
+      sql,
+      selectedKeys,
+      baseKeys: [...baseRequirements.keys()],
+      sourceTable,
+      displayFormats,
+      warnings: []
+    };
+  }
+  const outerSelects = outputColumns.map(column => `  ${column.expression} AS ${sqlIdentifier(column.name)}`);
   const sql = [
     "SELECT",
-    selectLines.join(",\n"),
-    `FROM ${quotedTableName("bpc_consolidated_report")}`,
-    "WHERE",
-    whereLines.map(formatWhereConditionLine).join("\n")
-  ].join("\n");
+    outerSelects.join(",\n"),
+    "FROM (",
+    "  SELECT",
+    innerSelects.join(",\n"),
+    `  FROM ${quotedTableName(sourceTable)}`,
+    whereLines.length
+      ? [
+          "  WHERE",
+          whereLines.map((line, index) => `    ${index ? "AND " : ""}${line}`).join("\n")
+        ].join("\n")
+      : "",
+    ") base"
+  ].filter(Boolean).join("\n");
 
   return {
     sql,
     selectedKeys,
-    baseKeys: [...new Set(baseKeys)],
-    resolvedAccountItems,
-    period,
+    baseKeys: [...baseRequirements.keys()],
+    sourceTable,
     displayFormats,
     warnings: []
   };
@@ -4899,156 +4516,16 @@ function buildDeterministicMetricSql(payload, generated, mandatoryContext) {
     ...(generated?.decision?.selected_metric_keys || []),
     ...(generated?.display_formats || []).map(item => item?.metric_key || item?.key).filter(Boolean)
   ].filter(Boolean))];
-  const resolvedAccountItems = resolvedAccountItemsFromPayload(payload);
   const metrics = metricCatalogMap(payload);
+  const resolvedItems = resolvedItemsFromResultsets(payload?.retrieval_plan, payload?.resolved_sql_resultsets || []);
   let selectedKeys = filterSelectedMetricKeysByCoverage(payload, metrics, candidateSelectedKeys);
   selectedKeys = expandSelectedMetricKeysByBreakdown(payload, metrics, selectedKeys);
-  selectedKeys = expandSelectedMetricKeysByComponentOutputRule(payload, generated, mandatoryContext, metrics, selectedKeys);
-  if (!selectedKeys.length && !resolvedAccountItems.length) return null;
+  if (!selectedKeys.length && !resolvedItems.length) return null;
   const selectedMetrics = selectedKeys.map(key => metrics.get(key)).filter(Boolean);
-  if (selectedKeys.length && !selectedMetrics.length && !resolvedAccountItems.length) return null;
-  const multiReadiness = multiPeriodReadiness(payload, generated, metrics, selectedKeys, resolvedAccountItems);
-
-  const multiPeriodSql = buildDeterministicMultiPeriodMetricSql(
-    payload,
-    generated,
-    mandatoryContext,
-    metrics,
-    selectedKeys,
-    resolvedAccountItems
-  );
-  if (multiPeriodSql) return multiPeriodSql;
-  if (multiReadiness.wants_multi_period && multiReadiness.periods.length > 1) {
-    return null;
-  }
-
-  const period = bpcPeriodInfo(payload, generated?.sql || "");
-  if (!period.period) return null;
-
-  const simpleBpcSql = buildSimpleBpcMetricSql({
-    payload,
-    generated,
-    mandatoryContext,
-    metrics,
-    selectedKeys,
-    selectedMetrics,
-    resolvedAccountItems,
-    period
-  });
-  if (simpleBpcSql) return { ...simpleBpcSql, multiPeriodReadiness: multiReadiness };
-
-  const baseRequirements = new Map();
-  const periodValues = new Set([period.period]);
-  const warnings = [];
-  const addBaseRequirement = (key, metric, dep = {}) => {
-    const role = dep.periodRole || dep.period_role || "current_period";
-    const variable = dep.variable || key;
-    const alias = safeMetricAlias(`${key}__${role}__${variable}`);
-    const requirementKey = `${key}::${role}::${variable}`;
-    if (!baseRequirements.has(requirementKey)) {
-      const expression = bpcBaseRequirementExpression(metric, period, role);
-      if (!expression) return null;
-      bpcRolePeriods(period, role, metric).forEach(item => periodValues.add(item));
-      if (period.asksMonth && String(role) === "current_period" && bpcMetricLooksCumulative(metric)) {
-        warnings.push(`${metric.name || key} 为累计科目，已按 ${period.period} - ${period.previous} 计算本月发生额。`);
-      }
-      baseRequirements.set(requirementKey, { key, metric, role, variable, alias, expression });
-    }
-    return `\`${alias}\``;
-  };
-
-  const resolveMetricExpression = (key, dep = {}, stack = []) => {
-    const metric = metrics.get(key);
-    if (!metric || stack.includes(key)) return null;
-    if (metricKind(metric) !== "derived") {
-      return addBaseRequirement(key, metric, dep);
-    }
-    const deps = metricDependencySpecs(metric);
-    if (!deps.length) return false;
-    const replacements = new Map();
-    for (const child of deps) {
-      const childExpression = resolveMetricExpression(child.metricKey, child, [...stack, key]);
-      if (!childExpression) return null;
-      replacements.set(child.variable || child.metricKey, `(${childExpression})`);
-      replacements.set(child.metricKey, `(${childExpression})`);
-    }
-    const formula = metricExpression(metric);
-    const expression = replaceMetricTokens(formula, replacements);
-    if (!expression || unresolvedMetricFormulaTokens(formula, replacements).length) return null;
-    return expression;
-  };
-
-  const outerSelects = [];
-  const displayFormats = [];
-  for (const key of selectedKeys) {
-    const metric = metrics.get(key);
-    if (!metric) continue;
-    const name = metric.name || key;
-    const presentation = metricPresentation(metric, name, generated?.display_formats || []);
-    const displayFormat = metricDisplayFormat(metric, name, presentation);
-    if (displayFormat) displayFormats.push(displayFormat);
-    const expression = resolveMetricExpression(key, { variable: key, periodRole: "current_period" });
-    if (!expression) return null;
-    outerSelects.push(`  ${applyMetricPresentationToSql(expression, presentation)} AS \`${name}\``);
-  }
-  for (const item of resolvedAccountItems) {
-    const expression = bpcResolvedAccountExpression(item, period);
-    if (!expression) continue;
-    if (period.asksMonth && period.previous && /^(APL|CF)/i.test(item.code)) {
-      periodValues.add(period.previous);
-      warnings.push(`${item.item} 为 ${item.code}，已按 ${period.period} - ${period.previous} 计算本月发生额。`);
-    }
-    const alias = safeMetricAlias(`resolved_sql_resultset__${item.code}__${item.item}`);
-    baseRequirements.set(`resolved::${item.code}::${item.item}`, {
-      key: item.item,
-      metric: null,
-      role: "current_period",
-      variable: item.item,
-      alias,
-      expression,
-      source: item.resultset_key
-    });
-    outerSelects.push(`  \`${alias}\` AS \`${item.item}\``);
-  }
-  if (!outerSelects.length) return null;
-  const sourceTables = new Set([...baseRequirements.values()].map(item => item.metric ? metricSourceTable(item.metric) : "bpc_consolidated_report").filter(Boolean));
-  if (sourceTables.size !== 1 || !sourceTables.has("bpc_consolidated_report")) return null;
-  const innerSelects = [...baseRequirements.values()].map(item => `    ${item.expression} AS \`${item.alias}\``);
-
-  const allScopeText = [...baseRequirements.values()]
-    .filter(item => item.metric)
-    .map(item => metricScopeExpression(item.metric))
-    .join("\n");
-  const mandatoryFilters = (mandatoryContext?.sql_filters || [])
-    .filter(item => resolvedAccountItems.length || !(item?.field && hasFieldReference(allScopeText, item.field)))
-    .map(item => item.sql)
-    .filter(Boolean);
-  const whereLines = [
-    `b28_s_kgd353d IN (${[...periodValues].filter(Boolean).map(sqlLiteral).join(", ")})`,
-    ...mandatoryFilters
-  ];
-  const sql = [
-    "SELECT",
-    outerSelects.join(",\n"),
-    "FROM (",
-    "  SELECT",
-    innerSelects.join(",\n"),
-    `  FROM ${quotedTableName("bpc_consolidated_report")}`,
-    "  WHERE",
-    whereLines.map((line, index) => `    ${index ? "AND " : ""}${line}`).join("\n"),
-    ") base"
-  ].join("\n");
-
-  return {
-    sql,
-    selectedKeys,
-    baseKeys: [...new Set([...baseRequirements.values()].map(item => item.key))],
-    resolvedAccountItems,
-    period,
-    multiPeriodReadiness: multiReadiness,
-    displayFormats,
-    warnings
-  };
+  if (selectedKeys.length && !selectedMetrics.length) return null;
+  const genericMetricSql = buildGenericDeterministicMetricSql(payload, generated, mandatoryContext, metrics, selectedKeys, resolvedItems);
+  if (genericMetricSql) return genericMetricSql;
+  return null;
 }
 
 function deterministicSeedFromRetrievalPlan(payload, plan) {
@@ -5060,8 +4537,7 @@ function deterministicSeedFromRetrievalPlan(payload, plan) {
     ...(plan?.selected_rule_keys || []),
     ...(Array.isArray(plan?.semantic_plan?.rules) ? plan.semantic_plan.rules : [])
   ].filter(Boolean))];
-  const hasResolvedItems = resolvedAccountItemsFromPayload(payload).length > 0;
-  if (!selectedMetricKeys.length && !hasResolvedItems) return null;
+  if (!selectedMetricKeys.length) return null;
   return {
     answer: "",
     answer_type: "sql_needed",
@@ -5301,9 +4777,7 @@ async function callNl2Sql(payload, options = {}) {
     const deterministicSeed = deterministicSeedFromRetrievalPlan(enrichedPayload, retrievalPlan);
     if (deterministicSeed) {
       const normalizedSeed = normalizeGeneratedSqlData(deterministicSeed, enrichedPayload);
-      const deterministicPreview = hasAnalyticalSqlShape(normalizedSeed.sql)
-        ? buildDeterministicAnalyticalMetricSql(enrichedPayload, normalizedSeed, mandatoryContext)
-        : buildDeterministicMetricSql(enrichedPayload, normalizedSeed, mandatoryContext);
+      const deterministicPreview = buildDeterministicMetricSql(enrichedPayload, normalizedSeed, mandatoryContext);
       if (deterministicPreview?.sql) {
         generation = {
           model: "deterministic-compiler",
@@ -5396,50 +4870,10 @@ async function callNl2Sql(payload, options = {}) {
   ];
   const metricExpansionStartedAt = Date.now();
   const preserveAnalyticalSql = hasAnalyticalSqlShape(generated.sql);
-  const deterministicAnalyticalSql = preserveAnalyticalSql
-    ? buildDeterministicAnalyticalMetricSql(enrichedPayload, generated, mandatoryContext)
-    : null;
   const deterministicMetricSql = preserveAnalyticalSql
     ? null
     : buildDeterministicMetricSql(enrichedPayload, generated, mandatoryContext);
-  if (deterministicAnalyticalSql?.sql) {
-    generated.sql = deterministicAnalyticalSql.sql;
-    generated.display_formats = [
-      ...(generated.display_formats || []),
-      ...(deterministicAnalyticalSql.displayFormats || [])
-    ];
-    generated.sql_plan = [
-      ...(generated.sql_plan || []),
-      {
-        part: "SELECT",
-        value: "按模型识别出的时间序列结构展开业务指标",
-        source: "deterministic_analytical_metric_expansion",
-        note: "保留按年/同比等分析结构，但用业务指标配置中的 scope_filter、measure.field 和 result_factor 生成稳定 SQL。"
-      }
-    ];
-    pushTrace(traceItem(
-      "metric_expansion",
-      "按分析结构展开指标口径",
-      "success",
-      metricExpansionStartedAt,
-      `输出指标：${semanticEntryLabels(enrichedPayload, "business_metric", deterministicAnalyticalSql.selectedKeys, 8)}；期间：${deterministicAnalyticalSql.periods.join("、")}`,
-      {
-        selected_metric_keys: deterministicAnalyticalSql.selectedKeys,
-        base_metric_keys: deterministicAnalyticalSql.baseKeys,
-        periods: deterministicAnalyticalSql.periods,
-        include_yoy: deterministicAnalyticalSql.includeYoy,
-        display_formats: deterministicAnalyticalSql.displayFormats || [],
-        sql: deterministicAnalyticalSql.sql
-      },
-      "模型负责识别按年和同比结构，后端用指标配置补齐符号、科目过滤和公共口径，避免分析维度被压成单值。",
-      {
-        id: "metric_expansion",
-        purpose: "把业务指标配置和模型识别出的分析结构合并成稳定 SQL。",
-        finding: `期间 ${deterministicAnalyticalSql.periods.join("、")}；同比=${deterministicAnalyticalSql.includeYoy ? "是" : "否"}`,
-        decision: "采用分析型指标展开 SQL，继续进入只读校验和数据库查询。"
-      }
-    ));
-  } else if (deterministicMetricSql?.sql) {
+  if (deterministicMetricSql?.sql) {
     generated.sql = deterministicMetricSql.sql;
     generated.display_formats = deterministicMetricSql.displayFormats || [];
     generated.sql_plan = [
@@ -5467,8 +4901,7 @@ async function callNl2Sql(payload, options = {}) {
       {
         selected_metric_keys: deterministicMetricSql.selectedKeys,
         base_metric_keys: deterministicMetricSql.baseKeys,
-        period: deterministicMetricSql.period,
-        multi_period_readiness: deterministicMetricSql.multiPeriodReadiness || null,
+        source_table: deterministicMetricSql.sourceTable || "",
         display_formats: deterministicMetricSql.displayFormats || [],
         sql: deterministicMetricSql.sql
       },
@@ -5549,7 +4982,7 @@ async function callNl2Sql(payload, options = {}) {
   }
 
   stageStartedAt = Date.now();
-  const enforcement = enforceMandatoryContextOnGenerated(generated, mandatoryContext);
+  const enforcement = enforceMandatoryContextOnGenerated(generated, mandatoryContext, enrichedPayload);
 
   let validation;
   stageStartedAt = Date.now();
@@ -5750,7 +5183,7 @@ async function callNl2Sql(payload, options = {}) {
           ])
         ].filter(warning => !/^SQL 第 \d+ 次执行失败后已自动修复/.test(String(warning || "")));
         generated = repaired;
-        const repairEnforcement = enforceMandatoryContextOnGenerated(generated, mandatoryContext);
+        const repairEnforcement = enforceMandatoryContextOnGenerated(generated, mandatoryContext, enrichedPayload);
         validation = validateReadOnlySql(generated.sql, enrichedPayload);
         repairAttempts += 1;
         pushTrace(traceItem(
@@ -5920,7 +5353,7 @@ async function callNl2Sql(payload, options = {}) {
   const enforcedFinal = enforceAnswerResultSummary(finalData, execution, generated, enrichedPayload);
   finalData = ensureFinalAnswerPeriodContext(enforcedFinal.finalData, execution);
   const displayFormats = rendererDisplayFormats(enrichedPayload, generated, execution.columns || []);
-  const resolvedAccountItems = resolvedAccountItemsFromPayload(enrichedPayload);
+  const resolvedLookupItems = resolvedItemsFromResultsets(enrichedPayload.retrieval_plan, resolvedSqlResultsets);
   return {
     model: finalAnswer.model || generation.model,
     data: finishPayload({
@@ -5939,7 +5372,7 @@ async function callNl2Sql(payload, options = {}) {
       },
       sql_validation: { ok: true, ...validation },
       warnings: [...new Set([...(generated.warnings || []), ...(finalData.warnings || [])].filter(Boolean))]
-        .filter(warning => !warningContradictsResolvedItems(warning, resolvedAccountItems))
+        .filter(warning => !warningContradictsResolvedItems(warning, resolvedLookupItems))
         .filter(warning => !warningContradictsResolvedLookupEvidence(warning, enrichedPayload, execution))
     }),
     raw: finalAnswer.raw,
