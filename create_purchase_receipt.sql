@@ -61,8 +61,6 @@ CREATE TABLE IF NOT EXISTS jst_flat.purchase_receipt_cn (
     zhxcl         VARCHAR(255)    COMMENT '核心材料',
     zgj           VARCHAR(255)    COMMENT '进口国家',
     zlb           VARCHAR(255)    COMMENT '类别',
-    unit_price_excl_tax  DECIMAL(38,6)   COMMENT '入库不含税单价',
-    unit_price_incl_tax  DECIMAL(38,6)   COMMENT '入库含税单价',
     remark        VARCHAR(255)    COMMENT '备注字段',
     is_calculated VARCHAR(255)    COMMENT '是否参与计算',
     delivery_amt  VARCHAR(255)    COMMENT '交货不含税总金额-原',

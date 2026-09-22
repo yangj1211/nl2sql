@@ -79,6 +79,10 @@ function compactEntry(entry) {
     name: spec.name || entryMeta.name || entry.key_name || "",
     aliases: splitAliases(aliases),
     source_table: firstTable,
+    source_tables: relatedTables,
+    tables: relatedTables,
+    priority: Number(spec.priority ?? 0),
+    injection_stages: Array.isArray(spec.injection_stages) ? spec.injection_stages : [],
     summary: String(
       spec.summary
       || spec.description
@@ -218,6 +222,13 @@ function buildPayload(workbenchData, testCase) {
       semantic_plan: {
         mode: "verified_metric_query | exploratory_table_query | direct_answer | needs_lookup | clarification",
         metrics: ["business metric key"],
+        knowledge_metrics: [{
+          name: "requested metric name",
+          formula: "standard formula",
+          dependencies: [{ name: "business concept", variable: "formula variable", evidence_type: "business_metric | sql_resultset | table_context | none", evidence_key: "string" }],
+          confidence: 0.0,
+          caveat: "string"
+        }],
         tables: ["table name"],
         time: "string or object",
         dimensions: ["field or business dimension"],
@@ -226,7 +237,8 @@ function buildPayload(workbenchData, testCase) {
         needs_lookup: ["object that needs code/enum lookup"],
         output: ["expected result columns"]
       },
-      sql: "single read-only SELECT SQL",
+      sql: "one read-only SELECT/WITH SQL, or empty when result_sets is used",
+      result_sets: [{ key: "string", title: "string", purpose: "string", sql: "one read-only SELECT/WITH SQL" }],
       warnings: ["string"]
     }
   };
@@ -241,14 +253,46 @@ async function fetchJson(path, options) {
 
 function allColumnNames(result) {
   const data = result.data || {};
+  const resultSets = Array.isArray(data.result_sets) ? data.result_sets : [];
   return [
     ...(data.execution?.columns || []),
-    ...(data.display?.columns || [])
+    ...(data.display?.columns || []),
+    ...resultSets.flatMap(item => [
+      ...(item?.execution?.columns || []),
+      ...(item?.display?.columns || [])
+    ])
   ].filter(Boolean);
 }
 
 function resultRows(result) {
-  return result.data?.execution?.rows || result.data?.display?.rows || [];
+  const data = result.data || {};
+  const resultSets = Array.isArray(data.result_sets) ? data.result_sets : [];
+  if (resultSets.length) {
+    return resultSets.flatMap(item => item?.execution?.rows || item?.display?.rows || []);
+  }
+  return data.execution?.rows || data.display?.rows || [];
+}
+
+function resultSql(result) {
+  const data = result.data || {};
+  return [...new Set([
+    data.sql,
+    ...(Array.isArray(data.result_sets) ? data.result_sets.map(item => item?.sql) : [])
+  ].filter(Boolean).map(String))].join("\n\n");
+}
+
+function appliedRuleKeys(result) {
+  const data = result.data || {};
+  const stageCoverage = data.rule_execution && typeof data.rule_execution === "object"
+    ? Object.values(data.rule_execution).filter(item => item && typeof item === "object")
+    : [];
+  return [...new Set([
+    ...(Array.isArray(data.applied_rule_keys) ? data.applied_rule_keys : []),
+    ...stageCoverage.flatMap(item => Array.isArray(item.applied_rule_keys) ? item.applied_rule_keys : []),
+    ...(Array.isArray(data.result_sets)
+      ? data.result_sets.flatMap(item => Array.isArray(item?.applied_rule_keys) ? item.applied_rule_keys : [])
+      : [])
+  ].map(String).filter(Boolean))];
 }
 
 function findColumn(columns, name) {
@@ -269,7 +313,8 @@ function assertCase(testCase, result) {
   const data = result.data || {};
   const columns = allColumnNames(result);
   const rows = resultRows(result);
-  const sql = String(data.sql || "");
+  const sql = resultSql(result);
+  const resultSets = Array.isArray(data.result_sets) ? data.result_sets : [];
   const answerAndWarnings = [
     data.answer,
     ...(Array.isArray(data.warnings) ? data.warnings : [])
@@ -289,13 +334,94 @@ function assertCase(testCase, result) {
     failures.push(`结果行数 ${rows.length} 小于期望 ${testCase.expect_min_rows}`);
   }
 
+  if (testCase.expect_result_set_count != null && resultSets.length !== Number(testCase.expect_result_set_count)) {
+    failures.push(`结果集数量 ${resultSets.length} 不等于期望 ${testCase.expect_result_set_count}`);
+  }
+
+  (testCase.expect_result_set_titles || []).forEach(title => {
+    if (!resultSets.some(item => includesLoose(item?.title || "", title))) {
+      failures.push(`缺少结果集标题：${title}`);
+    }
+  });
+
+  (testCase.expect_result_set_column_counts || []).forEach(expectation => {
+    const matchingSet = resultSets.find(item => includesLoose(item?.title || "", expectation?.title || ""));
+    if (!matchingSet) {
+      failures.push(`无法检查结果集列数，缺少标题：${expectation?.title || ""}`);
+      return;
+    }
+    const setColumns = matchingSet?.execution?.columns || matchingSet?.display?.columns || [];
+    if (setColumns.length !== Number(expectation.count)) {
+      failures.push(`结果集“${expectation.title}”列数 ${setColumns.length} 不等于期望 ${expectation.count}`);
+    }
+  });
+
+  (testCase.expect_result_set_columns || []).forEach(expectation => {
+    const matchingSet = resultSets.find(item => includesLoose(item?.title || "", expectation?.title || ""));
+    if (!matchingSet) {
+      failures.push(`无法检查结果集字段顺序，缺少标题：${expectation?.title || ""}`);
+      return;
+    }
+    const setColumns = matchingSet?.execution?.columns || matchingSet?.display?.columns || [];
+    const expectedColumns = Array.isArray(expectation?.columns) ? expectation.columns : [];
+    if (
+      setColumns.length !== expectedColumns.length
+      || expectedColumns.some((column, index) => normalizeText(setColumns[index]) !== normalizeText(column))
+    ) {
+      failures.push(
+        `结果集“${expectation.title}”字段顺序不符：实际 ${setColumns.join("、")}；期望 ${expectedColumns.join("、")}`
+      );
+    }
+  });
+
+  (testCase.expect_result_set_sql_contains || []).forEach(expectation => {
+    const matchingSets = resultSets.filter(item => includesLoose(item?.title || "", expectation?.title || ""));
+    if (!matchingSets.length) {
+      failures.push(`无法检查结果集 SQL，缺少标题：${expectation?.title || ""}`);
+      return;
+    }
+    (expectation?.fragments || []).forEach(fragment => {
+      if (matchingSets.some(item => !includesLoose(item?.sql || "", fragment))) {
+        failures.push(`结果集“${expectation.title}”SQL 缺少：${fragment}`);
+      }
+    });
+  });
+
+  (testCase.reject_result_set_sql_contains || []).forEach(expectation => {
+    const matchingSets = resultSets.filter(item => includesLoose(item?.title || "", expectation?.title || ""));
+    if (!matchingSets.length) {
+      failures.push(`无法检查结果集 SQL，缺少标题：${expectation?.title || ""}`);
+      return;
+    }
+    (expectation?.fragments || []).forEach(fragment => {
+      if (matchingSets.some(item => includesLoose(item?.sql || "", fragment))) {
+        failures.push(`结果集“${expectation.title}”SQL 不应包含：${fragment}`);
+      }
+    });
+  });
+
+  const appliedRules = appliedRuleKeys(result);
+  (testCase.expect_applied_rule_keys || []).forEach(key => {
+    if (!appliedRules.includes(String(key))) failures.push(`强制规则未标记为已执行：${key}`);
+  });
+
+  const trace = Array.isArray(data.trace) ? data.trace : [];
+  (testCase.reject_failed_trace_stages || []).forEach(stage => {
+    const failedItems = trace.filter(item => item?.stage === stage && item?.status === "failed");
+    if (failedItems.length) {
+      failures.push(
+        `阶段 ${stage} 不应失败：${failedItems.map(item => item?.detail || item?.label || "未知错误").join("；")}`
+      );
+    }
+  });
+
   Object.entries(testCase.expect_approx || {}).forEach(([column, expectation]) => {
     const actualColumn = findColumn(columns, column);
     if (!actualColumn) {
       failures.push(`无法检查数值，缺少列：${column}`);
       return;
     }
-    const firstRow = rows[0] || {};
+    const firstRow = rows.find(row => Object.prototype.hasOwnProperty.call(row || {}, actualColumn)) || {};
     const actual = numericValue(firstRow[actualColumn]);
     const expected = Number(expectation.value);
     const tolerance = Number(expectation.tolerance ?? 0);
@@ -343,6 +469,7 @@ async function run() {
   const selectedCaseId = args.includes("--case") ? args[args.indexOf("--case") + 1] : "";
   const listOnly = args.includes("--list");
   const showSql = args.includes("--show-sql");
+  const showRules = args.includes("--show-rules");
   const cases = JSON.parse(readFileSync(casesPath, "utf8"));
   if (listOnly) {
     cases.forEach(item => console.log(`${item.id}\t${item.question}`));
@@ -375,7 +502,7 @@ async function run() {
         failures.forEach(item => console.log(`  - ${item}`));
         console.log(`  列：${allColumnNames(result).join(", ") || "无"}`);
         console.log(`  回答：${String(result.data?.answer || "").slice(0, 300)}`);
-        console.log(`  SQL：${String(result.data?.sql || "").slice(0, 1200).replace(/\n/g, " ")}`);
+        console.log(`  SQL：${resultSql(result).slice(0, 6000).replace(/\n/g, " ")}`);
         const trace = result.data?.trace || [];
         const metricTrace = trace.find(item => item.stage === "metric_expansion");
         if (metricTrace) {
@@ -387,13 +514,27 @@ async function run() {
         if (result.data?.retrieval_plan) {
           console.log(`  语义计划：${JSON.stringify(result.data.retrieval_plan).slice(0, 2000)}`);
         }
+        if (showRules) {
+          const ruleTraces = (result.data?.trace || [])
+            .filter(item => ["output_contract", "rule_contract", "sql_decomposition"].includes(item.stage))
+            .map(item => ({ label: item.label, status: item.status, detail: item.detail, artifact: item.artifact }));
+          console.log(`  规则执行：${JSON.stringify(result.data?.rule_execution || null)}`);
+          console.log(`  规则轨迹：${JSON.stringify(ruleTraces).slice(0, 12000)}`);
+        }
         console.log(`  耗时：${summarizeTimings(result)}`);
       } else {
         passed += 1;
         console.log(`PASS ${testCase.id} (${duration}s)`);
         if (showSql) {
           console.log(`  耗时：${summarizeTimings(result)}`);
-          console.log(`  SQL：${String(result.data?.sql || "").slice(0, 3000).replace(/\n/g, " ")}`);
+          console.log(`  SQL：${resultSql(result).slice(0, 10000).replace(/\n/g, " ")}`);
+        }
+        if (showRules) {
+          const ruleTraces = (result.data?.trace || [])
+            .filter(item => ["output_contract", "rule_contract", "sql_decomposition"].includes(item.stage))
+            .map(item => ({ label: item.label, status: item.status, detail: item.detail, artifact: item.artifact }));
+          console.log(`  规则执行：${JSON.stringify(result.data?.rule_execution || null)}`);
+          console.log(`  规则轨迹：${JSON.stringify(ruleTraces)}`);
         }
       }
     } catch (error) {

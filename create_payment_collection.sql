@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS jst_flat.payment_collection (
     cprctr      VARCHAR(255) COMMENT '利润中心（清洗后）',
     cprctx      VARCHAR(255) COMMENT '利润中心描述（清洗后）',
     wsl         DECIMAL(23,2) COMMENT '以交易货币计的金额',
-    osl         DECIMAL(23,2) COMMENT '以自由定义的货币1计的金额',
+    ksl         DECIMAL(23,2) COMMENT '集团货币金额',
     bldat       VARCHAR(255) COMMENT '凭证日期',
     blart       VARCHAR(255) COMMENT '凭证类型',
     zuonr       VARCHAR(255) COMMENT '分配编号',

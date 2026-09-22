@@ -7,7 +7,7 @@ TRUNCATE TABLE jst_flat.payment_collection;
 
 INSERT INTO jst_flat.payment_collection
 (rbukrs, cbukrs, cbuktx, belnr, xtruerev, rwcur, rocur, racct, prctr, cprctr, cprctx,
- wsl, osl, bldat, blart, zuonr, sgtxt, kunnr, kunnr_txt, comp_head, drcrk,
+ wsl, ksl, bldat, blart, zuonr, sgtxt, kunnr, kunnr_txt, comp_head, drcrk,
  zsal_rep, vkgrp, vkbur, zsal_det, dept_id, dept_name, cbugrp, data_source)
 SELECT * FROM (
 
@@ -21,7 +21,7 @@ SELECT
     -- 利润中心清洗: 优先bukrs非空匹配, fallback bukrs为空
     COALESCE(f1.cprctr, f2.cprctr),
     COALESCE(f1.cprctx, f2.cprctx),
-    a.wsl, a.osl,
+    a.wsl, a.ksl,
     a.bldat, a.blart, a.zuonr, a.sgtxt,
     a.kunnr,
     -- 客户描述: sysid='CN1' AND kunnr=customer 关联 dws_bpqx
@@ -96,9 +96,7 @@ SELECT
     COALESCE(f1.cprctr, f2.cprctr),
     COALESCE(f1.cprctx, f2.cprctx),
     a.wsl,
-    -- osl: RMB/CNY直接取wsl, 其他走TCURR换算。勿写 THEN wsl ELSE ukurs*wsl：
-    -- MatrixOne 对 CASE 分支做类型对齐时会把 ELSE 放大 10^5（ukurs decimal(9,5) vs wsl decimal(23,2)）
-    CASE WHEN a.rwcur NOT IN ('RMB', 'CNY') THEN d.ukurs * a.wsl ELSE a.wsl END,
+    a.ksl,
     a.bldat, a.blart, a.zuonr, a.sgtxt,
     a.kunnr,
     -- 客户描述: sysid='US1' AND kunnr=customer 关联 dws_bpqx
@@ -115,9 +113,6 @@ SELECT
     g.cbugrp,
     'BM' AS data_source
 FROM dwd_dcp.DWD_BM_ACDOCA a
--- TCURR汇率: fcurr=rwcur, tcurr='CNY', gdatu=bldat, kurst='M'
-LEFT JOIN dwd_dcp.DWD_S4_TCURR d
-    ON d.fcurr = a.rwcur AND d.tcurr = 'CNY' AND d.gdatu = a.bldat AND d.kurst = 'M'
 -- 公司代码清洗: rbukrs=sbukrs, 取cbukrs/cbuktx
 LEFT JOIN dwd_dcp.DWD_BW_ZTBPC002_COM e ON a.rbukrs = e.sbukrs
 -- 利润中心清洗: sysid='US1', bukrs非空优先匹配

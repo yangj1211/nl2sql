@@ -272,5 +272,93 @@
     "expect_min_rows": 2,
     "expect_sql_contains": ["2026.05", "2025.05", "APL6600", "TFUA3000", "TFUA2000", "TFUA4000"],
     "reject_sql_contains": ["2026.04"]
+  },
+  {
+    "id": "bpc_long_term_debt_working_capital_ratio_2025",
+    "model_id": 40032,
+    "question": "2025年长期负债与营运资金比率是多少",
+    "tables": ["bpc_consolidated_report"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "应命中长期负债与营运资金比率定义，按非流动负债除以营业收入计算，并按百分比展示最终指标。",
+    "expect_answer_contains": ["长期负债与营运资金比率"],
+    "expect_any_column_groups": [
+      ["长期负债与营运资金比率"]
+    ],
+    "expect_min_rows": 1,
+    "expect_sql_contains": ["ABS0302", "APL6000"],
+    "reject_answer_contains": ["未定义", "证据不足", "无法确定", "未找到"]
+  },
+  {
+    "id": "six_transactions_controller_overdue_projects",
+    "model_id": 100040001,
+    "question": "提供港联科技控股旗下所有欠款项目",
+    "tables": ["accounts_receivable_realtime"],
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "应按集团控股方筛选港联科技，完整返回所有存在欠款的项目及对应欠款金额；可以按业务需要返回一个或多个结构合法的结果集。",
+    "expect_answer_contains": ["统计截止至", "尚未支付的欠款金额", "尚未入账"],
+    "expect_any_column_groups": [
+      ["项目名称", "工程项目名称", "BSTKD_E"],
+      ["欠款金额", "应收余额", "YSYE"]
+    ],
+    "expect_result_set_count": 3,
+    "expect_result_set_titles": ["应收汇总", "订单明细", "交货单/分批次明细"],
+    "expect_result_set_column_counts": [{ "title": "订单明细", "count": 25 }, { "title": "交货单/分批次明细", "count": 32 }],
+    "expect_result_set_columns": [
+      { "title": "应收汇总", "columns": ["工程项目名称", "应收余额"] },
+      { "title": "订单明细", "columns": ["销售代表处描述", "销售代表描述", "客户名称", "销售订单号", "工程项目名称", "付款条件文本", "合同总价", "款项性质", "欠款性质", "款项是否明确", "发货金额", "到货日期", "已开发票金额", "已回款金额", "已回款比例", "未解付票据金额", "未解付票据到期时间", "预收款", "应收余额", "当时逾期总额", "欠款比例（分批次应收余额/合同已发货总额）", "实际逾期总额", "实际逾期比例", "逾期天数", "付款所需手续"] },
+      { "title": "交货单/分批次明细", "columns": ["销售代表处描述", "销售代表描述", "客户名称", "销售订单号", "工程项目名称", "付款条件文本", "付款条件描述", "质保期备注", "合同总价", "交货单号", "款项性质", "欠款性质", "款项是否明确", "发货金额", "到货日期", "已开发票时间", "已开发票金额", "已回款时间", "已回款金额", "已回款比例", "未解付票据金额", "未解付票据到期时间", "预收款", "应收余额", "当时逾期总额", "欠款比例（分批次应收余额/对应分批次发货金额）", "欠款性质（按交货单）", "实际到期日", "实际逾期总额", "实际逾期比例", "逾期天数", "付款所需手续"] }
+    ],
+    "expect_result_set_sql_contains": [
+      { "title": "应收汇总", "fragments": ["COMP_HEAD", "YSYE"] },
+      { "title": "订单明细", "fragments": ["COMP_HEAD", "BEZEI", "VKGRP_T", "NAME1", "VBELN", "BSTKD_E", "Z_TERM_CODE", "KZWI1", "KXXZ", "Z_QKXZ", "ZKXSFMQ", "Z_DE_AMOUNT", "Z_AR_DATE", "Z_IN_AMOUNT", "Z_RE_AMOUNT", "ZCBBA", "ZCBDT", "Z_AD_AMOUNT", "YSYE", "DSYQZE", "Z_DB_RATE_2", "ZSJZE", "ZZB", "TS", "ZFKSXSX"] },
+      { "title": "交货单/分批次明细", "fragments": ["COMP_HEAD", "BEZEI", "VKGRP_T", "NAME1", "VBELN", "BSTKD_E", "Z_TERM_CODE", "Z_TERM_TEXT", "Z_Z003_TEXT", "KZWI1", "Z_XBLNR", "KXXZ", "Z_QKXZ", "Z_QKXZ_C", "ZKXSFMQ", "Z_DE_AMOUNT", "Z_AR_DATE", "Z_IN_DAT", "Z_IN_AMOUNT", "Z_RE_DAT", "Z_RE_AMOUNT", "ZCBBA", "ZCBDT", "Z_AD_AMOUNT", "YSYE", "DSYQZE", "Z_DB_RATE_1", "ZSJFBDT", "ZSJZE", "ZZB", "TS", "ZFKSXSX"] }
+    ],
+    "reject_result_set_sql_contains": [{ "title": "应收汇总", "fragments": ["YSYE > 0"] }],
+    "expect_applied_rule_keys": ["应收账款实时表强制输出", "强硬输出规则1", "强硬输出规则2", "强硬输出规则3"],
+    "reject_failed_trace_stages": ["sql_decomposition"],
+    "expect_min_rows": 1,
+    "expect_sql_contains": ["COMP_HEAD", "BSTKD_E", "YSYE"],
+    "reject_answer_contains": ["未定义", "证据不足", "无法确定", "未找到", "借款或者其他应收款项"]
+  },
+  {
+    "id": "six_transactions_controller_overdue_projects_all_tables",
+    "model_id": 100040001,
+    "question": "提供港联科技控股旗下所有欠款项目",
+    "qa_config": {
+      "data_path": "legal",
+      "transaction_scope": "all"
+    },
+    "expected_answer": "在六大往来全部表范围内应先正确路由到应收账款实时表，再输出应收汇总、订单明细、交货单明细和强制文字总结。",
+    "expect_answer_contains": ["统计截止至", "尚未支付的欠款金额", "尚未入账"],
+    "expect_any_column_groups": [
+      ["项目名称", "工程项目名称", "BSTKD_E"],
+      ["欠款金额", "应收余额", "YSYE"]
+    ],
+    "expect_result_set_count": 3,
+    "expect_result_set_titles": ["应收汇总", "订单明细", "交货单/分批次明细"],
+    "expect_result_set_column_counts": [{ "title": "订单明细", "count": 25 }, { "title": "交货单/分批次明细", "count": 32 }],
+    "expect_result_set_columns": [
+      { "title": "应收汇总", "columns": ["工程项目名称", "应收余额"] },
+      { "title": "订单明细", "columns": ["销售代表处描述", "销售代表描述", "客户名称", "销售订单号", "工程项目名称", "付款条件文本", "合同总价", "款项性质", "欠款性质", "款项是否明确", "发货金额", "到货日期", "已开发票金额", "已回款金额", "已回款比例", "未解付票据金额", "未解付票据到期时间", "预收款", "应收余额", "当时逾期总额", "欠款比例（分批次应收余额/合同已发货总额）", "实际逾期总额", "实际逾期比例", "逾期天数", "付款所需手续"] },
+      { "title": "交货单/分批次明细", "columns": ["销售代表处描述", "销售代表描述", "客户名称", "销售订单号", "工程项目名称", "付款条件文本", "付款条件描述", "质保期备注", "合同总价", "交货单号", "款项性质", "欠款性质", "款项是否明确", "发货金额", "到货日期", "已开发票时间", "已开发票金额", "已回款时间", "已回款金额", "已回款比例", "未解付票据金额", "未解付票据到期时间", "预收款", "应收余额", "当时逾期总额", "欠款比例（分批次应收余额/对应分批次发货金额）", "欠款性质（按交货单）", "实际到期日", "实际逾期总额", "实际逾期比例", "逾期天数", "付款所需手续"] }
+    ],
+    "expect_result_set_sql_contains": [
+      { "title": "应收汇总", "fragments": ["COMP_HEAD", "YSYE"] },
+      { "title": "订单明细", "fragments": ["COMP_HEAD", "BEZEI", "VKGRP_T", "NAME1", "VBELN", "BSTKD_E", "Z_TERM_CODE", "KZWI1", "KXXZ", "Z_QKXZ", "ZKXSFMQ", "Z_DE_AMOUNT", "Z_AR_DATE", "Z_IN_AMOUNT", "Z_RE_AMOUNT", "ZCBBA", "ZCBDT", "Z_AD_AMOUNT", "YSYE", "DSYQZE", "Z_DB_RATE_2", "ZSJZE", "ZZB", "TS", "ZFKSXSX"] },
+      { "title": "交货单/分批次明细", "fragments": ["COMP_HEAD", "BEZEI", "VKGRP_T", "NAME1", "VBELN", "BSTKD_E", "Z_TERM_CODE", "Z_TERM_TEXT", "Z_Z003_TEXT", "KZWI1", "Z_XBLNR", "KXXZ", "Z_QKXZ", "Z_QKXZ_C", "ZKXSFMQ", "Z_DE_AMOUNT", "Z_AR_DATE", "Z_IN_DAT", "Z_IN_AMOUNT", "Z_RE_DAT", "Z_RE_AMOUNT", "ZCBBA", "ZCBDT", "Z_AD_AMOUNT", "YSYE", "DSYQZE", "Z_DB_RATE_1", "ZSJFBDT", "ZSJZE", "ZZB", "TS", "ZFKSXSX"] }
+    ],
+    "reject_result_set_sql_contains": [{ "title": "应收汇总", "fragments": ["YSYE > 0"] }],
+    "expect_applied_rule_keys": ["应收账款实时表强制输出", "强硬输出规则1", "强硬输出规则2", "强硬输出规则3"],
+    "reject_failed_trace_stages": ["sql_decomposition"],
+    "expect_min_rows": 1,
+    "expect_sql_contains": ["accounts_receivable_realtime", "COMP_HEAD", "BSTKD_E", "YSYE"],
+    "reject_sql_contains": ["receivable_other_realtime"],
+    "reject_answer_contains": ["未定义", "证据不足", "无法确定", "未找到", "借款或者其他应收款项"]
   }
 ]

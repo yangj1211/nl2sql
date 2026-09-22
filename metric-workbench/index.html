@@ -1948,7 +1948,7 @@
     .dependency-table {
       border: 1px solid #dbe3ef;
       border-radius: 9px;
-      overflow: hidden;
+      overflow: visible;
       background: #fff;
     }
 
@@ -1962,7 +1962,7 @@
 
     .dependency-row {
       display: grid;
-      grid-template-columns: minmax(150px, 0.8fr) minmax(220px, 1.15fr) minmax(130px, 0.7fr) minmax(180px, 1fr) 34px;
+      grid-template-columns: minmax(130px, 0.8fr) minmax(190px, 1.1fr) minmax(130px, 0.75fr) minmax(120px, 0.7fr) minmax(150px, 0.9fr) 34px;
       gap: 8px;
       align-items: center;
       padding: 10px;
@@ -1978,6 +1978,22 @@
 
     .dependency-row:last-child {
       border-bottom: 0;
+    }
+
+    .dependency-cell {
+      min-width: 0;
+    }
+
+    .dependency-cell > input,
+    .dependency-cell > select,
+    .dependency-cell > .searchable-select {
+      width: 100%;
+    }
+
+    .dependency-cell-remove {
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
     .dependency-row input,
@@ -2009,6 +2025,77 @@
       padding: 12px;
       color: #64748b;
       font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .dependency-source-list,
+    .derived-source-list {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .dependency-source-chip,
+    .derived-source-chip {
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
+      max-width: 100%;
+      min-height: 28px;
+      padding: 5px 8px;
+      border-radius: 7px;
+      background: #edf5ff;
+      color: #1e4f7a;
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .dependency-source-empty {
+      color: #64748b;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .derived-source-field {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .derived-source-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .derived-source-mode {
+      color: #475569;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .derived-source-control {
+      min-height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 10px;
+      border: 1px solid #cfd7e3;
+      border-radius: 9px;
+      background: #f8fafc;
+    }
+
+    .derived-source-hint {
+      margin: 0;
+      color: #64748b;
+      font-size: 12px;
       line-height: 1.5;
     }
 
@@ -2064,6 +2151,61 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       color: #0f172a;
       background: #fff;
+    }
+
+    @media (max-width: 900px) {
+      .dependency-row-head {
+        display: none;
+      }
+
+      .dependency-row {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: end;
+        gap: 12px;
+      }
+
+      .dependency-cell::before {
+        content: attr(data-column-label);
+        display: block;
+        margin-bottom: 6px;
+        color: #64748b;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .dependency-cell-remove {
+        justify-content: flex-end;
+      }
+
+      .dependency-custom-period {
+        grid-template-columns: 1fr;
+      }
+
+      .dependency-custom-period label {
+        padding-top: 0;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .semantic-modal {
+        width: calc(100vw - 24px);
+      }
+
+      .modal-head,
+      .modal-body {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+
+      .dependency-row {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .derived-source-label,
+      .derived-source-control {
+        align-items: flex-start;
+        flex-direction: column;
+      }
     }
 
     .period-template-row {
@@ -6519,6 +6661,7 @@
         return [
           `-- 派生指标：${selectedMetric.name || selectedMetric.code}`,
           "-- 该指标不能直接按单个字段聚合，需要先分别展开依赖指标，再执行公式。",
+          `-- 数据来源：${relatedTableLabel(selectedMetric)}`,
           `-- 依赖指标：${(selectedMetric.dependencies || []).join(", ") || "待配置"}`,
           "",
           "WITH expanded_metric_results AS (",
@@ -6682,13 +6825,18 @@
 
     function compactSemanticEntryForModel(metric) {
       const type = semanticEntryType(metric);
+      const sourceTables = relatedTables(metric);
       const base = {
         key: metric.code || metric.sourceTable || metric.name,
         type,
         name: metric.name || metric.tableDescription || metric.sourceTable || metric.code,
         aliases: aliasItems(metric),
-        source_table: metric.sourceTable || relatedTables(metric)[0] || "",
-        summary: entrySummary(metric).slice(0, type === "logic_text" ? 1800 : 900)
+        source_table: metric.calculationType === "derived" ? "" : metric.sourceTable || sourceTables[0] || "",
+        source_tables: sourceTables,
+        tables: sourceTables,
+        summary: entrySummary(metric).slice(0, type === "logic_text" ? 1800 : 900),
+        priority: Number(metric.priority ?? 0),
+        injection_stages: metric.injectionStages || []
       };
       if (type === "business_metric") {
         base.metric_kind = metric.calculationType || "base";
@@ -6887,16 +7035,25 @@
           semantic_plan: {
             mode: "verified_metric_query | exploratory_table_query | direct_answer | needs_lookup | clarification",
             metrics: ["business metric key"],
+            knowledge_metrics: [{
+              name: "requested metric name",
+              formula: "standard formula",
+              dependencies: [{ name: "business concept", variable: "formula variable", evidence_type: "business_metric | sql_resultset | table_context | none", evidence_key: "string" }],
+              confidence: 0.0,
+              caveat: "string"
+            }],
             tables: ["table name"],
             time: "string or object",
             dimensions: ["field or business dimension"],
             calculations: ["aggregation, yoy, ranking, distribution, detail, count"],
             filters: ["business condition or rule key"],
             needs_lookup: ["object that needs code/enum lookup"],
-            output: ["expected result columns"]
+            output: ["expected result columns"],
+            result_sets: [{ key: "string", title: "string", purpose: "string", rule_keys: ["logic_text key"], output: ["expected columns"] }]
           },
           sql_plan: [{ part: "string", value: "string", source: "string", note: "string" }],
-          sql: "single read-only SELECT SQL after backend planning",
+          sql: "one read-only SELECT/WITH SQL, or empty when result_sets is used",
+          result_sets: [{ key: "string", title: "string", purpose: "string", sql: "one read-only SELECT/WITH SQL" }],
           warnings: ["string"]
         }
       };
@@ -6917,7 +7074,17 @@
     async function requestDetectiveAgentModel(localResult) {
       const controller = new AbortController();
       activeAssistantRequestController = controller;
-      const timer = setTimeout(() => controller.abort(), 180_000);
+      const idleTimeoutMs = 90_000;
+      let idleTimedOut = false;
+      let timer = null;
+      const resetIdleTimer = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          idleTimedOut = true;
+          controller.abort();
+        }, idleTimeoutMs);
+      };
+      resetIdleTimer();
       try {
         const response = await fetch("/api/nl2sql-stream", {
           method: "POST",
@@ -6935,6 +7102,7 @@
         while (true) {
           const { value, done } = await reader.read();
           if (value) {
+            resetIdleTimer();
             buffer += decoder.decode(value, { stream: true });
             const blocks = buffer.split(/\n\n/);
             buffer = blocks.pop() || "";
@@ -6959,8 +7127,11 @@
         if (donePayload.ok === false) throw new Error(donePayload.error || "模型接口请求失败");
         return donePayload;
       } catch (error) {
+        if (error.name === "AbortError" && idleTimedOut) {
+          throw new Error("请求连续 90 秒没有收到任何进展，可能是模型服务或数据库查询未返回。");
+        }
         if (error.name === "AbortError") {
-          throw new Error("请求超过 180 秒仍未完成，可能是模型服务或数据库查询未返回。");
+          throw new Error("请求已取消。");
         }
         throw error;
       } finally {
@@ -7022,8 +7193,10 @@
         evidence: Array.isArray(modelData.sql_plan) && modelData.sql_plan.length ? modelData.sql_plan : [],
         execution: modelData.execution || null,
         display: modelData.display || null,
+        resultSets: Array.isArray(modelData.result_sets) ? modelData.result_sets : [],
         sqlValidation: modelData.sql_validation || null,
         mandatoryContext,
+        ruleExecution: modelData.rule_execution || null,
         retrievalPlan: modelData.retrieval_plan || null,
         semanticPlan: modelData.retrieval_plan?.semantic_plan || modelData.semantic_plan || null,
         trace: Array.isArray(modelData.trace) ? modelData.trace : [],
@@ -7808,47 +7981,6 @@
       return `${text}${format.suffix || ""}`;
     }
 
-    function isTotalableColumn(column, rows = [], formats = []) {
-      const name = String(column || "");
-      const lower = name.toLowerCase();
-      if (/(id|code|编码|代码|编号|单号|凭证|订单|期间|年度|年份|月份|日期|时间|货币|币种|currency|cur|gjahr|poper|belnr|rbukrs|racct|rcntr|dept)/i.test(name)) {
-        return false;
-      }
-      if (isPercentDisplayColumn(name, formats) || /(单价|unit[_\s-]*price)/i.test(name)) {
-        return false;
-      }
-      const looksLikeAmount = /(金额|合计|余额|收入|成本|费用|利润|税额|价|值|数量|重量|总额|净额|amount|amt|money|balance|revenue|cost|profit|price|value|qty|quantity|wsl|tsl|dmbtr|wrbtr|menge)/i.test(lower);
-      if (!looksLikeAmount) return false;
-      return rows.some(row => parseResultNumber(row?.[column]) != null);
-    }
-
-    function formatTotalNumber(value) {
-      if (!Number.isFinite(value)) return "";
-      const rounded = Math.round((value + Number.EPSILON) * 100) / 100;
-      return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
-    }
-
-    function buildTotalRow(columns, rows, formats = []) {
-      if (!columns.length || rows.length <= 1) return null;
-      const totalColumns = columns.filter(column => isTotalableColumn(column, rows, formats));
-      if (!totalColumns.length) return null;
-      const totalRow = {};
-      const labelColumn = columns.find(column => !totalColumns.includes(column)) || columns[0];
-      columns.forEach(column => {
-        if (totalColumns.includes(column)) {
-          const sum = rows.reduce((total, row) => {
-            const value = parseResultNumber(row?.[column]);
-            return value == null ? total : total + value;
-          }, 0);
-          totalRow[column] = formatTotalNumber(sum);
-        } else {
-          totalRow[column] = column === labelColumn ? "合计" : "";
-        }
-      });
-      totalRow.__isTotalRow = true;
-      return totalRow;
-    }
-
     const RESULT_CHART_COLORS = ["#2563eb", "#0f766e", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#65a30d"];
 
     function isChartNumericColumn(column, rows = []) {
@@ -8121,29 +8253,43 @@
       `;
     }
 
-    function renderResultTable(display, execution, formattedSql = "", sqlTableLabel = "") {
+    function renderResultTable(display, execution, formattedSql = "", sqlTableLabel = "", resultTitle = "查询结果") {
       const columns = display?.columns?.length ? display.columns : execution?.columns || [];
       const displayRows = display?.rows?.length ? display.rows : execution?.rows || [];
       const totalSourceRows = execution?.rows?.length ? execution.rows : displayRows;
       const displayFormats = Array.isArray(display?.formats) ? display.formats : [];
       if (!columns.length || !displayRows.length) return "";
-      const totalRow = buildTotalRow(columns, totalSourceRows, displayFormats);
-      const formattedRows = displayRows.map(row => Object.fromEntries(columns.map(column => [column, displayResultCell(column, row?.[column], displayFormats)])));
-      const formattedTotalRow = totalRow ? Object.fromEntries(columns.map(column => [column, displayResultCell(column, totalRow?.[column], displayFormats)])) : null;
+      const hasEmbeddedTotalRow = displayRows.some(row => row && row.__isTotalRow);
+      const formattedRows = displayRows.map(row => ({
+        ...Object.fromEntries(columns.map(column => [column, displayResultCell(column, row?.[column], displayFormats)])),
+        __isTotalRow: Boolean(row?.__isTotalRow)
+      }));
       const downloadBaseRows = totalSourceRows.map(row => Object.fromEntries(columns.map(column => [column, displayResultCell(column, row?.[column], displayFormats)])));
-      const downloadRows = formattedTotalRow ? [...downloadBaseRows, formattedTotalRow] : downloadBaseRows;
-      const downloadId = registerExcelDownload(columns, downloadRows, "问数查询结果.xlsx");
+      const includeTotalInDownload = display?.presentation_directives?.result_table?.include_in_download !== false;
+      const formattedBackendTotalRow = display?.total_row_applied && display?.total_row
+        ? Object.fromEntries(columns.map(column => [column, displayResultCell(column, display.total_row?.[column], displayFormats)]))
+        : null;
+      const downloadRows = formattedBackendTotalRow && includeTotalInDownload
+        ? [...downloadBaseRows, formattedBackendTotalRow]
+        : downloadBaseRows;
+      const safeTitle = String(resultTitle || "查询结果").replace(/[\\/:*?"<>|]/g, "_");
+      const downloadId = registerExcelDownload(columns, downloadRows, `${safeTitle}.xlsx`);
       const sqlPanelId = formattedSql ? `result_sql_${Date.now()}_${resultSqlPanelSeq += 1}` : "";
       const sqlCopyId = formattedSql ? registerCopyText(formattedSql) : "";
       const chartModel = buildResultChartModel(columns, totalSourceRows, displayFormats);
       const chartPanelId = chartModel ? `result_chart_${Date.now()}_${resultChartSeq += 1}` : "";
-      const visibleRows = formattedRows.slice(0, 50);
+      const visibleRows = hasEmbeddedTotalRow
+        ? [
+            ...formattedRows.filter(row => !row.__isTotalRow).slice(0, 49),
+            ...formattedRows.filter(row => row.__isTotalRow).slice(-1)
+          ]
+        : formattedRows.slice(0, 50);
       return `
         <section class="qa-panel">
           <div class="qa-panel-title">
             <span class="qa-panel-title-main">
-              <span>查询结果</span>
-              <span class="qa-panel-title-meta">${execution?.row_count ?? displayRows.length} 行${totalRow ? " · 含合计" : ""}</span>
+              <span>${escapeHtml(resultTitle || "查询结果")}</span>
+              <span class="qa-panel-title-meta">${execution?.row_count ?? displayRows.length} 行${hasEmbeddedTotalRow ? " · 含合计" : ""}</span>
             </span>
             <span class="qa-panel-actions">
               ${formattedSql ? `<button class="copy-btn" type="button" data-toggle-result-sql="${escapeHtml(sqlPanelId)}" aria-expanded="false">查看 SQL</button>` : ""}
@@ -8156,15 +8302,43 @@
               <thead><tr>${columns.map(column => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead>
               <tbody>
                 ${visibleRows.map(row => `
-                  <tr>${columns.map(column => `<td>${escapeHtml(row?.[column] ?? "")}</td>`).join("")}</tr>
+                  <tr${row.__isTotalRow ? ` class="total-row"` : ""}>${columns.map(column => `<td>${escapeHtml(row?.[column] ?? "")}</td>`).join("")}</tr>
                 `).join("")}
-                ${formattedTotalRow ? `
-                  <tr class="total-row">${columns.map(column => `<td>${escapeHtml(formattedTotalRow[column] ?? "")}</td>`).join("")}</tr>
-                ` : ""}
               </tbody>
             </table>
           </div>
           ${renderResultChartPanel(chartPanelId, chartModel)}
+          ${formattedSql ? `
+            <div class="qa-result-sql-panel" id="${escapeHtml(sqlPanelId)}" hidden>
+              <div class="qa-result-sql-title">
+                <span>SQL${sqlTableLabel ? ` · ${escapeHtml(sqlTableLabel)}` : ""}</span>
+                ${copyButton(sqlCopyId)}
+              </div>
+              <pre class="qa-sql">${escapeHtml(formattedSql)}</pre>
+            </div>
+          ` : ""}
+        </section>
+      `;
+    }
+
+    function renderResultSetFallback(resultSet, formattedSql = "", sqlTableLabel = "") {
+      const sqlPanelId = formattedSql ? `result_sql_${Date.now()}_${resultSqlPanelSeq += 1}` : "";
+      const sqlCopyId = formattedSql ? registerCopyText(formattedSql) : "";
+      const title = resultSet?.title || "查询结果";
+      const execution = resultSet?.execution || {};
+      const detail = resultSet?.error || execution.message || (execution.executed ? "查询结果为空。" : "当前结果集未执行。");
+      return `
+        <section class="qa-panel">
+          <div class="qa-panel-title">
+            <span class="qa-panel-title-main">
+              <span>${escapeHtml(title)}</span>
+              <span class="qa-panel-title-meta">${execution.executed ? `${execution.row_count || 0} 行` : "未完成"}</span>
+            </span>
+            <span class="qa-panel-actions">
+              ${formattedSql ? `<button class="copy-btn" type="button" data-toggle-result-sql="${escapeHtml(sqlPanelId)}" aria-expanded="false">查看 SQL</button>` : ""}
+            </span>
+          </div>
+          <div class="qa-warning">${escapeHtml(detail)}</div>
           ${formattedSql ? `
             <div class="qa-result-sql-panel" id="${escapeHtml(sqlPanelId)}" hidden>
               <div class="qa-result-sql-title">
@@ -8524,12 +8698,24 @@
       `;
     }
 
-    function renderRuleEvidence(rules) {
+    function ruleExecutionStatus(result, rule) {
+      const key = String(rule?.code || rule?.name || "");
+      const stages = [
+        result?.ruleExecution?.sql_generation,
+        result?.ruleExecution?.renderer_rule
+      ].filter(Boolean);
+      if (stages.some(stage => (stage.missing_rule_keys || []).includes(key))) return "未落实";
+      if (stages.some(stage => (stage.applied_rule_keys || []).includes(key))) return "已执行";
+      if (stages.some(stage => (stage.not_applicable_rules || []).some(item => item?.key === key))) return "不适用";
+      return "已选用";
+    }
+
+    function renderRuleEvidence(rules, result) {
       if (!rules.length) return "";
       return `
         <section class="evidence-section">
           <div class="evidence-section-title">
-            <span>命中的业务规则</span>
+            <span>业务规则执行情况</span>
             <span class="evidence-chip">${rules.length} 条</span>
           </div>
           <div class="evidence-section-body evidence-rule-list">
@@ -8537,7 +8723,7 @@
               <div class="evidence-rule-card">
                 <div class="evidence-rule-head">
                   <span>${escapeHtml(rule.code || rule.name || "未命名规则")}</span>
-                  <span class="evidence-chip">优先级 ${escapeHtml(priorityValue(rule))}</span>
+                  <span class="evidence-chip">${escapeHtml(ruleExecutionStatus(result, rule))} · 优先级 ${escapeHtml(priorityValue(rule))}</span>
                 </div>
                 <div class="evidence-rule-meta">
                   关联表：${escapeHtml(relatedTableLabel(rule)) || "未填写"} · 注入阶段：${escapeHtml((rule.injectionStages || []).join("、") || "未填写")}
@@ -8595,7 +8781,7 @@
             </div>
             ${renderMandatoryEvidence(result)}
             ${renderMetricEvidence(selectedMetric, result, metricList)}
-            ${renderRuleEvidence(selectedRules)}
+            ${renderRuleEvidence(selectedRules, result)}
             ${renderSqlEvidenceTable(result.evidence)}
           </div>
         </details>
@@ -8725,7 +8911,20 @@
       const selectedRules = result.decision?.selectedRules || [];
       const formattedSql = result.sqlText ? formatSqlForDisplay(result.sqlText) : "";
       const sqlCopyId = formattedSql ? registerCopyText(formattedSql) : "";
-      const resultTableHtml = renderResultTable(result.display, result.execution, formattedSql, selectedKnowledgeBaseTableText("、"));
+      const sqlTableLabel = selectedKnowledgeBaseTableText("、");
+      const resultSets = Array.isArray(result.resultSets) ? result.resultSets : [];
+      const resultTableHtml = resultSets.length
+        ? resultSets.map(resultSet => {
+            const resultSetSql = resultSet?.sql ? formatSqlForDisplay(resultSet.sql) : "";
+            return renderResultTable(
+              resultSet?.display,
+              resultSet?.execution,
+              resultSetSql,
+              sqlTableLabel,
+              resultSet?.title || "查询结果"
+            ) || renderResultSetFallback(resultSet, resultSetSql, sqlTableLabel);
+          }).join("")
+        : renderResultTable(result.display, result.execution, formattedSql, sqlTableLabel);
       el.innerHTML = `
         <div class="qa-answer">
           <div class="qa-status">
@@ -9003,9 +9202,48 @@
         .replaceAll('"', "&quot;");
     }
 
+    function storedRelatedTables(metric) {
+      if (Array.isArray(metric?.relatedTables) && metric.relatedTables.length) {
+        return [...new Set(metric.relatedTables.filter(Boolean))];
+      }
+      return metric?.sourceTable ? [metric.sourceTable] : [];
+    }
+
+    function metricByCode(code, ownerMetric = null) {
+      const key = String(code || "").trim();
+      if (!key) return null;
+      const ownerModelId = Number(ownerMetric?.modelId || selectedKnowledgeBaseId);
+      return metrics.find(item => item.code === key && Number(item.modelId || ownerModelId) === ownerModelId)
+        || metrics.find(item => item.code === key)
+        || null;
+    }
+
+    function inferredDerivedSourceTables(metric, stack = new Set()) {
+      if (!metric || metric.calculationType !== "derived") return storedRelatedTables(metric);
+      const identity = `${metric.modelId || selectedKnowledgeBaseId}:${metric.code || metric.name || "derived"}`;
+      if (stack.has(identity)) return [];
+      const nextStack = new Set(stack);
+      nextStack.add(identity);
+      const tables = ensureDerivedDependencies(metric).flatMap(dep => {
+        const dependencyMetric = metricByCode(dep.metricKey, metric);
+        if (!dependencyMetric) return [];
+        return dependencyMetric.calculationType === "derived"
+          ? inferredDerivedSourceTables(dependencyMetric, nextStack)
+          : storedRelatedTables(dependencyMetric);
+      });
+      return [...new Set(tables.filter(Boolean))];
+    }
+
     function relatedTables(metric) {
-      if (Array.isArray(metric.relatedTables)) return metric.relatedTables;
-      return metric.sourceTable ? [metric.sourceTable] : [];
+      if (metric?.calculationType === "derived") {
+        return inferredDerivedSourceTables(metric);
+      }
+      return storedRelatedTables(metric);
+    }
+
+    function dependencySourceTables(dep, ownerMetric) {
+      const dependencyMetric = metricByCode(dep?.metricKey, ownerMetric);
+      return dependencyMetric ? relatedTables(dependencyMetric) : [];
     }
 
     function relatedTableLabel(metric) {
@@ -9088,7 +9326,7 @@
             <th>指标名称</th>
             <th>类型</th>
             <th>指标类型</th>
-            <th>关联表</th>
+            <th>数据来源</th>
             <th>更新时间</th>
             <th>操作</th>
           </tr>
@@ -9150,7 +9388,7 @@
             ? "搜索 Key / 问法 / 答案 / 关联表"
             : activeSemanticType === "table_column_note"
               ? "搜索表名 / 表描述 / 列名"
-              : "搜索 Key / 指标名称 / 关联表";
+              : "搜索 Key / 指标名称 / 数据来源";
       document.getElementById("newMetricBtn").textContent = activeSemanticType === "logic_text"
         ? "+ 新增规则"
         : activeSemanticType === "result_presentation"
@@ -10435,6 +10673,35 @@
         }));
     }
 
+    function renderSourceChips(tables, className) {
+      return tables.map(table => `<span class="${className}" title="${escapeHtml(table)}">${escapeHtml(table)}</span>`).join("");
+    }
+
+    function renderDerivedSourceSummary(metric) {
+      const sources = inferredDerivedSourceTables(metric);
+      const mode = sources.length > 1
+        ? `多表计算 · ${sources.length} 张表`
+        : sources.length === 1
+          ? "单表计算"
+          : "等待依赖指标";
+      return `
+        <div class="field derived-source-field">
+          <div class="derived-source-label">
+            <label><span class="required">*</span>数据来源</label>
+            <span class="derived-source-mode">${mode}</span>
+          </div>
+          <div class="derived-source-control">
+            <div class="derived-source-list">
+              ${sources.length
+                ? renderSourceChips(sources, "derived-source-chip")
+                : '<span class="dependency-source-empty">选择依赖指标后自动显示来源表</span>'}
+            </div>
+          </div>
+          <p class="derived-source-hint">派生指标不手工绑定单一表。系统会先按每个依赖指标自己的来源表取数，再按共同业务粒度对齐并计算公式。</p>
+        </div>
+      `;
+    }
+
     function renderDerivedDependencyEditor(metric) {
       const dependencies = ensureDerivedDependencies(metric);
       const metricOptions = businessMetricOptions(metric.code);
@@ -10451,18 +10718,36 @@
           ? metricOptions
           : [{ value: dep.metricKey, label: dep.metricKey }, ...metricOptions];
         const customPeriod = dep.periodRole === "custom_expression";
+        const sourceTables = dependencySourceTables(dep, metric);
         return `
           <div class="dependency-item">
             <div class="dependency-row">
-              <input data-derived-dep-index="${index}" data-derived-dep-key="variable" value="${escapeHtml(dep.variable || defaultDependencyVariable(dep.metricKey, dep.periodRole))}" placeholder="例如 avg_accounts_receivable" />
-              <select data-derived-dep-index="${index}" data-derived-dep-key="metricKey">
-                ${options.map(option => `<option value="${escapeHtml(option.value)}" ${option.value === dep.metricKey ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
-              </select>
-              <select data-derived-dep-index="${index}" data-derived-dep-key="periodRole">
-                ${periodOptions.map(option => `<option value="${option.value}" ${option.value === dep.periodRole ? "selected" : ""}>${option.label}</option>`).join("")}
-              </select>
-              <input data-derived-dep-index="${index}" data-derived-dep-key="note" value="${escapeHtml(dep.note || "")}" placeholder="补充说明" />
-              <button class="dependency-remove" type="button" data-remove-derived-dependency="${index}" aria-label="删除依赖">×</button>
+              <div class="dependency-cell" data-column-label="计算引用">
+                <input data-derived-dep-index="${index}" data-derived-dep-key="variable" aria-label="计算引用" value="${escapeHtml(dep.variable || defaultDependencyVariable(dep.metricKey, dep.periodRole))}" placeholder="例如 avg_accounts_receivable" />
+              </div>
+              <div class="dependency-cell" data-column-label="指标">
+                <select data-derived-dep-index="${index}" data-derived-dep-key="metricKey" aria-label="依赖指标">
+                  ${options.map(option => `<option value="${escapeHtml(option.value)}" ${option.value === dep.metricKey ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+                </select>
+              </div>
+              <div class="dependency-cell" data-column-label="来源表">
+                <div class="dependency-source-list">
+                  ${sourceTables.length
+                    ? renderSourceChips(sourceTables, "dependency-source-chip")
+                    : '<span class="dependency-source-empty">来源表待配置</span>'}
+                </div>
+              </div>
+              <div class="dependency-cell" data-column-label="取数期间">
+                <select data-derived-dep-index="${index}" data-derived-dep-key="periodRole" aria-label="取数期间">
+                  ${periodOptions.map(option => `<option value="${option.value}" ${option.value === dep.periodRole ? "selected" : ""}>${option.label}</option>`).join("")}
+                </select>
+              </div>
+              <div class="dependency-cell" data-column-label="口径说明">
+                <input data-derived-dep-index="${index}" data-derived-dep-key="note" aria-label="口径说明" value="${escapeHtml(dep.note || "")}" placeholder="补充说明" />
+              </div>
+              <div class="dependency-cell dependency-cell-remove" data-column-label="操作">
+                <button class="dependency-remove" type="button" data-remove-derived-dependency="${index}" aria-label="删除依赖">×</button>
+              </div>
             </div>
             ${customPeriod ? `
               <div class="dependency-custom-period">
@@ -10488,6 +10773,7 @@
             <div class="dependency-row dependency-row-head">
               <span>计算引用</span>
               <span>指标</span>
+              <span>来源表</span>
               <span>取数期间</span>
               <span>口径说明</span>
               <span></span>
@@ -11031,9 +11317,11 @@
 
         <section class="form-section">
           <h3>适用范围</h3>
-          <div class="form-grid">
-            ${modalSelect("关联表", metric.sourceTable, "sourceTable", sourceOptions, true)}
-          </div>
+          ${kind === "derived" ? renderDerivedSourceSummary(metric) : `
+            <div class="form-grid">
+              ${modalSelect("关联表", metric.sourceTable, "sourceTable", sourceOptions, true)}
+            </div>
+          `}
         </section>
 
         <section class="form-section">
@@ -11141,15 +11429,19 @@
         `名称：${metric.name || "未填写"}`,
         ""
       ];
-      lines.push(`关联表：${metric.sourceTable || "未填写"}`);
       if (metric.calculationType === "derived") {
         const deps = ensureDerivedDependencies(metric);
+        lines.push(`数据来源：${relatedTableLabel(metric)}`);
         lines.push(`计算公式：${metric.expression || "未填写"}`);
         lines.push("依赖指标：");
         lines.push(deps.length
-          ? deps.map(dep => `- ${dep.metricKey}（计算引用：${dep.variable || dep.metricKey}，${dependencyPeriodSummary(dep)}）${dep.note ? `：${dep.note}` : ""}`).join("\n")
+          ? deps.map(dep => {
+              const source = dependencySourceTables(dep, metric).join("、") || "来源表待配置";
+              return `- ${dep.metricKey}（计算引用：${dep.variable || dep.metricKey}，来源：${source}，${dependencyPeriodSummary(dep)}）${dep.note ? `：${dep.note}` : ""}`;
+            }).join("\n")
           : "未填写");
       } else {
+        lines.push(`关联表：${metric.sourceTable || "未填写"}`);
         lines.push(`统计结果：${resultFormula(metric) || "未填写"}`);
         lines.push("过滤范围：");
         lines.push(filterSqlText(metric) || "未配置");
@@ -11650,9 +11942,13 @@
         return [
           `-- 指标：${metric.name}`,
           "-- 先按各依赖指标自己的口径取数，再执行下面公式",
+          `-- 数据来源：${relatedTableLabel(metric)}`,
           "-- 依赖取数口径：",
           ...(deps.length
-            ? deps.map(dep => `-- ${dep.metricKey} AS ${dep.variable || dep.metricKey}：${dependencyPeriodSummary(dep)}${dep.note ? `，${dep.note}` : ""}`)
+            ? deps.map(dep => {
+                const source = dependencySourceTables(dep, metric).join("、") || "来源表待配置";
+                return `-- ${dep.metricKey} AS ${dep.variable || dep.metricKey}：${source}，${dependencyPeriodSummary(dep)}${dep.note ? `，${dep.note}` : ""}`;
+              })
             : ["-- 待填写"]),
           "",
           `SELECT`,
@@ -11818,14 +12114,15 @@ ${conditions};
           ? metricKindForJson(metric)
           : null,
         name: metric.name,
-        aliases: aliasItems(metric)
+        aliases: aliasItems(metric),
+        tables: relatedTables(metric)
       };
       if (metric.calculationType === "derived") {
         const dependencies = ensureDerivedDependencies(metric);
         return {
           entry,
           metric: {
-            source_table: metric.sourceTable,
+            source_tables: relatedTables(metric),
             expression: metric.expression,
             dependencies: dependencies.map(dependencySpecPayload)
           }
@@ -11855,6 +12152,7 @@ ${conditions};
       const type = semanticEntryType(metric);
       if (type === "table_column_note") return [metric.sourceTable || metric.code].filter(Boolean);
       if (type === "business_metric") {
+        if (metric.calculationType === "derived") return relatedTables(metric);
         return [metric.sourceTable || relatedTables(metric)[0] || primaryKnowledgeTable()].filter(Boolean);
       }
       return relatedTables(metric);
@@ -11872,7 +12170,7 @@ ${conditions};
           name: metric.name || "",
           aliases: aliasItems(metric),
           metric: {
-            source_table: metric.sourceTable || primaryKnowledgeTable() || "",
+            source_tables: relatedTables(metric),
             expression: metric.expression || "",
             dependencies: dependencies.map(dependencySpecPayload)
           }
@@ -12104,6 +12402,7 @@ ${conditions};
 
       if (metric.calculationType === "derived") {
         const deps = ensureDerivedDependencies(metric);
+        const sourceTables = inferredDerivedSourceTables(metric);
         checks.push({
           level: metric.expression ? "ok" : "bad",
           text: metric.expression ? "已配置计算公式" : "缺少计算公式"
@@ -12111,6 +12410,12 @@ ${conditions};
         checks.push({
           level: deps.length ? "ok" : "bad",
           text: deps.length ? "已配置依赖指标" : "缺少依赖指标"
+        });
+        checks.push({
+          level: sourceTables.length ? "ok" : "bad",
+          text: sourceTables.length
+            ? `已从依赖指标推导 ${sourceTables.length} 张来源表${sourceTables.length > 1 ? "，按多表指标处理" : ""}`
+            : "依赖指标尚未提供可用来源表"
         });
         checks.push({
           level: deps.every(dep => dep.variable) ? "ok" : "bad",

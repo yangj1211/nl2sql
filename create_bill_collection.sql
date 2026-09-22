@@ -1,5 +1,5 @@
 -- 单据回款表建表语句
--- 数据来源：jst_flat_table.payment_collection（zuonr, bldat, wsl, osl）
+-- 数据来源：jst_flat_table.payment_collection（zuonr, bldat, wsl, ksl）
 -- 欠款金额取数逻辑：jst_flat_table.vat_sales_invoice.ZSAPAMT汇总 - 回款金额wsl汇总，通过 VBELN = zuonr 关联
 -- 合同欠款金额取数逻辑：ods_s4.t_s4_performance.HTZJE - 回款金额wsl汇总，通过 VBELN = zuonr 关联
 CREATE TABLE IF NOT EXISTS jst_flat.bill_collection (

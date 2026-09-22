@@ -1,6 +1,6 @@
 -- 单据回款表数据插入
 -- 主驱动表：ods_s4.t_s4_performance（按VBELN去重，取头层数据）
--- 一对多展开 jst_flat_table.payment_collection（通过 VBELN = zuonr），取 rbukrs, belnr, bldat, wsl, osl
+-- 一对多展开 jst_flat_table.payment_collection（通过 VBELN = zuonr），取 rbukrs, belnr, bldat, wsl, ksl
 -- 欠款金额 = SUM(ZSAPAMT) - SUM(wsl)
 -- 合同欠款金额 = HTZJE - SUM(wsl)
 INSERT INTO jst_flat.bill_collection (

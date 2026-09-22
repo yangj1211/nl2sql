@@ -106,7 +106,7 @@ SELECT
   CASE
     WHEN s.`系统标识` = 'CN1' THEN cn_kna1.name1
     WHEN s.`系统标识` = 'US1' THEN
-      CASE WHEN us_but.name_org1 IS NULL OR TRIM(us_but.name_org1) = '' THEN us_kna1.name1 ELSE us_but.name_org1 END
+      CASE WHEN us_but.name_org1 IS NULL OR TRIM(us_but.name_org1) = '' THEN us_name_kna1.name1 ELSE us_but.name_org1 END
     ELSE NULL
   END AS `客户名称`,
 
@@ -123,13 +123,13 @@ SELECT
   CASE WHEN s.`系统标识` = 'CN1' THEN cn_but000.found_dat WHEN s.`系统标识` = 'US1' THEN us_min_erdat.min_erdat ELSE NULL END AS `客户首次合作日期`,
 
   -- ========== 客户所在国家代码: CN1取dwd_s4_kna1.land1, US1取dwd_bm_kna1.land1 ==========
-  CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.land1 WHEN s.`系统标识` = 'US1' THEN us_kna1.land1 ELSE NULL END AS `客户所在国家代码`,
+  CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.land1 WHEN s.`系统标识` = 'US1' THEN us_base_kna1.land1 ELSE NULL END AS `客户所在国家代码`,
 
   -- ========== 客户所在国家: 通过国家代码关联dwd_bw_bi0_tcountry取txtlg ==========
   country.txtlg AS `客户所在国家`,
 
   -- ========== 客户所在省份代码: CN1取dwd_s4_kna1.regio, US1取dwd_bm_kna1.regio ==========
-  CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.regio WHEN s.`系统标识` = 'US1' THEN us_kna1.regio ELSE NULL END AS `客户所在省份代码`,
+  CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.regio WHEN s.`系统标识` = 'US1' THEN us_base_kna1.regio ELSE NULL END AS `客户所在省份代码`,
 
   -- ========== 客户所在省份: 通过(国家代码+省份代码)关联dwd_bw_bi0_tregion取txtsh ==========
   region.txtsh AS `客户所在省份`,
@@ -140,7 +140,7 @@ SELECT
     WHEN s.`系统标识` = 'CN1' AND cn_dlv_kna1.land1 IS NOT NULL AND TRIM(cn_dlv_kna1.land1) != '' THEN cn_dlv_kna1.land1
     WHEN s.`系统标识` = 'US1' AND us_dlv_kna1.land1 IS NOT NULL AND TRIM(us_dlv_kna1.land1) != '' THEN us_dlv_kna1.land1
     WHEN s.`系统标识` = 'CN1' THEN cn_kna1.land1
-    WHEN s.`系统标识` = 'US1' THEN us_kna1.land1
+    WHEN s.`系统标识` = 'US1' THEN us_base_kna1.land1
     ELSE NULL
   END AS `实际出口国家`,
 
@@ -189,7 +189,10 @@ SELECT
   CASE WHEN s.`系统标识` = 'CN1' THEN cn_vbkd.bstkd_e WHEN s.`系统标识` = 'US1' THEN us_vbkd.bstkd ELSE NULL END AS `项目名称`,
 
   -- ========== 原始字段 ==========
-  s.`数量`, s.`主机台数`, s.`主机单台数量`, s.`主机数量`,
+  CAST(NULLIF(TRIM(s.`数量`), '') AS DECIMAL(23,2)) AS `数量`,
+  CAST(NULLIF(TRIM(s.`主机台数`), '') AS DECIMAL(23,2)) AS `主机台数`,
+  CAST(NULLIF(TRIM(s.`主机单台数量`), '') AS DECIMAL(23,2)) AS `主机单台数量`,
+  CAST(NULLIF(TRIM(s.`主机数量`), '') AS DECIMAL(23,2)) AS `主机数量`,
 
   -- ========== 货币: CN1取dwd_s4_vbak.waerk, US1取dwd_bm_vbak.waerk ==========
   CASE WHEN s.`系统标识` = 'CN1' THEN cn.waerk WHEN s.`系统标识` = 'US1' THEN us.waerk ELSE NULL END AS `货币`,
@@ -246,17 +249,29 @@ LEFT JOIN dwd_dcp.dwd_bw_ztbpc002_com org_desc
 LEFT JOIN dwd_dcp.dwd_s4_kna1 cn_kna1
   ON s.`系统标识` = 'CN1' AND cn_kna1.kunnr = LPAD(s.`客户`, 10, '0')
 
--- ========== US1客户名称(步骤1): 通过kunnr关联cvi_cust_link获取partner_guid ==========
+-- ========== US1客户集合: 从VBAK提取客户代码，与当前销售订单是否存在于VBAK无关 ==========
+LEFT JOIN (
+  SELECT DISTINCT kunnr
+  FROM dwd_dcp.dwd_bm_vbak
+  WHERE COALESCE(TRIM(kunnr), '') != ''
+) us_customer
+  ON s.`系统标识` = 'US1' AND us_customer.kunnr = LPAD(s.`客户`, 10, '0')
+
+-- ========== US1客户名称(步骤1): 通过客户代码关联cvi_cust_link获取partner_guid ==========
 LEFT JOIN dwd_dcp.dwd_bm_cvi_cust_link us_cl
-  ON s.`系统标识` = 'US1' AND us_cl.customer = us.kunnr
+  ON s.`系统标识` = 'US1' AND us_cl.customer = us_customer.kunnr
 
 -- ========== US1客户名称(步骤2): 通过partner_guid关联but000获取name_org1 ==========
 LEFT JOIN dwd_dcp.dwd_bm_but000 us_but
   ON s.`系统标识` = 'US1' AND us_but.partner_guid = us_cl.partner_guid
 
--- ========== US1客户名称(fallback): 当name_org1为空时, 通过kunnr关联dwd_bm_kna1取name1 ==========
-LEFT JOIN dwd_dcp.dwd_bm_kna1 us_kna1
-  ON s.`系统标识` = 'US1' AND us_kna1.kunnr = us.kunnr
+-- ========== US1客户名称(fallback): 当name_org1为空时, 通过VBAK客户代码关联dwd_bm_kna1取name1 ==========
+LEFT JOIN dwd_dcp.dwd_bm_kna1 us_name_kna1
+  ON s.`系统标识` = 'US1' AND us_name_kna1.kunnr = us_customer.kunnr
+
+-- ========== US1客户国家/省份: 直接通过源表客户代码关联dwd_bm_kna1，与VBAK订单无关 ==========
+LEFT JOIN dwd_dcp.dwd_bm_kna1 us_base_kna1
+  ON s.`系统标识` = 'US1' AND us_base_kna1.kunnr = LPAD(s.`客户`, 10, '0')
 
 -- ========== CN1订单行项目: 关联dwd_s4_vbkd(POSNR='000000')获取合同签订日期/项目名称/销售地区/订单类别 ==========
 LEFT JOIN dwd_dcp.dwd_s4_vbkd cn_vbkd
@@ -346,7 +361,7 @@ LEFT JOIN dwd_dcp.dwd_bm_tvakt us_tvakt
 
 -- ========== 客户所在国家: 通过国家代码关联dwd_bw_bi0_tcountry取txtlg ==========
 LEFT JOIN dwd_dcp.dwd_bw_bi0_tcountry country
-  ON country.country = CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.land1 WHEN s.`系统标识` = 'US1' THEN us_kna1.land1 ELSE NULL END
+  ON country.country = CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.land1 WHEN s.`系统标识` = 'US1' THEN us_base_kna1.land1 ELSE NULL END
 
 -- ========== 分销渠道描述: 通过vtweg关联dwd_s4_tvtwt取vtext ==========
 LEFT JOIN dwd_dcp.dwd_s4_tvtwt tvtwt
@@ -354,8 +369,8 @@ LEFT JOIN dwd_dcp.dwd_s4_tvtwt tvtwt
 
 -- ========== 客户所在省份: 通过(国家代码+省份代码)关联dwd_bw_bi0_tregion取txtsh ==========
 LEFT JOIN dwd_dcp.dwd_bw_bi0_tregion region
-  ON region.country = CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.land1 WHEN s.`系统标识` = 'US1' THEN us_kna1.land1 ELSE NULL END
-  AND region.region = CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.regio WHEN s.`系统标识` = 'US1' THEN us_kna1.regio ELSE NULL END
+  ON region.country = CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.land1 WHEN s.`系统标识` = 'US1' THEN us_base_kna1.land1 ELSE NULL END
+  AND region.region = CASE WHEN s.`系统标识` = 'CN1' THEN cn_kna1.regio WHEN s.`系统标识` = 'US1' THEN us_base_kna1.regio ELSE NULL END
 
 -- ========== CN1实际出口国家(交货方): 通过销售订单+交货行号找到交货单(lips→likp), 再取交货方的国家 ==========
 LEFT JOIN (

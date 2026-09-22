@@ -80,7 +80,7 @@ FROM dwd_dcp.DWD_S4_ACDOCA a
 LEFT JOIN dwd_dcp.DWD_S4_CSKT b
     ON a.rcntr = b.kostl AND b.datbi = '99991231'
 LEFT JOIN dwd_dcp.DWD_S4_CSKS c
-    ON a.rcntr = c.kostl
+    ON a.rcntr = c.kostl AND c.datbi = '99991231'
 LEFT JOIN dwd_dcp.DWD_S4_BKPF d
     ON a.rbukrs = d.bukrs AND a.gjahr = d.gjahr AND a.belnr = d.belnr
 LEFT JOIN dwd_dcp.DWD_S4_BSEG e

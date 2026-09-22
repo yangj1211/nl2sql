@@ -12,7 +12,7 @@ INSERT INTO jst_flat.purchase_receipt_cn (
     kschl, vtext, wrbtr, zwrbtr, zwrbtr2, zwrbtr3,
     bwart, belnr, buzei, budat, charg, lgort, bktxt, belnr_2,
     knttp, ptext, hkont, bednr, eindt, ctype,
-    zwlzxl, zjgpl, zhxcl, zgj, zlb, unit_price_excl_tax, unit_price_incl_tax, remark, is_calculated, delivery_amt, per_sap,
+    zwlzxl, zjgpl, zhxcl, zgj, zlb, remark, is_calculated, delivery_amt, per_sap,
     kbetr,
     comp_head
 )
@@ -34,14 +34,6 @@ SELECT
     a.bwart, a.belnr, a.buzei, a.budat, a.charg, a.lgort, a.bktxt, a.belnr_2,
     a.knttp, a.ptext, a.hkont, a.bednr, a.eindt, a.ctype,
     a.zwlzxl, a.zjgpl, a.zhxcl, a.zgj, a.zlb,
-    -- 入库不含税单价：集团币别入库含税值 / 入库数量
-    CASE WHEN a.menge_ekbe IS NOT NULL AND a.menge_ekbe != 0
-         THEN a.zwrbtr3 / a.menge_ekbe
-         ELSE NULL END AS unit_price_excl_tax,
-    -- 入库含税单价：入库不含税单价 * (1 + 税率/100)
-    CASE WHEN a.menge_ekbe IS NOT NULL AND a.menge_ekbe != 0
-         THEN (a.zwrbtr3 / a.menge_ekbe) * (1 + konp.kbetr / 1000)
-         ELSE NULL END AS unit_price_incl_tax,
     NULL AS remark,
     NULL AS is_calculated,
     NULL AS delivery_amt,
